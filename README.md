@@ -31,6 +31,18 @@ let result = client.status()?;
 let output = client.run_task(Task::foo())?;
 ```
 
+## Why not X?
+
+This crate was designed to be a better *pure Rust* RPC. Eventually, we plan to add cross-language binding and code-generation support. Other RPC solutions are popular, but their code generation is not very discoverable or ergonomic.
+
+With rsrpc, what you see is what you get. No extra types, traits, mods, etc. The only magic is that your trait is automatically implemented for the rspsc `Client<T>` type.
+
+**tarpc**: Client codegen isn't discoverable from the trait, requires a mandatory `Context` parameter, trait definition doesn't match the client interface.
+
+**tonic/gRPC**: Requires protobuf schemas, overkill for pure Rust services where cross-language support isn't needed.
+
+**Raw TCP/WebSocket**: Too low-level. You end up building dispatch tables and request correlation yourself.
+
 ## Stream Support
 
 The `Encoding` trait lets you define custom RPC types, useful for foreign object implemenations and streams.
@@ -103,18 +115,6 @@ impl Worker for LocalWorker {
     // ..
 }
 ```
-
-## Why not X?
-
-This crate was designed to be a better *pure Rust* RPC. Eventually, we plan to add cross-language binding and code-generation support. Other RPC solutions are popular, but their code generation is not very discoverable or ergonomic.
-
-With rsrpc, what you see is what you get. No extra types, traits, mods, etc. The only magic is that your trait is automatically implemented for the rspsc `Client<T>` type.
-
-**tarpc**: Client codegen isn't discoverable from the trait, requires a mandatory `Context` parameter, trait definition doesn't match the client interface.
-
-**tonic/gRPC**: Requires protobuf schemas, overkill for pure Rust services where cross-language support isn't needed.
-
-**Raw TCP/WebSocket**: Too low-level. You end up building dispatch tables and request correlation yourself.
 
 ## License
 

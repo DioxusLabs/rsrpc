@@ -10,7 +10,7 @@ use syn::{
 /// This macro generates:
 /// - Per-method request structs (private)
 /// - `impl Trait for Client<dyn Trait>` so clients can call methods directly
-/// - `serve_<trait_name>(impl Trait) -> Server<T>` helper function
+/// - `<dyn Trait>::serve(impl)` method to create a server
 ///
 /// # Example
 ///
@@ -21,23 +21,37 @@ use syn::{
 ///     async fn status(&self) -> WorkerStatus;
 /// }
 ///
-/// // Generated: impl Worker for Client<dyn Worker>
-/// // Generated: fn serve_worker(impl Worker) -> Server<impl Worker>
+/// // Client: impl Worker for Client<dyn Worker>
+/// // Server: <dyn Worker>::serve(my_impl)
 /// ```
+///
+/// # Local (non-Send) services
+///
+/// Use `#[rrpc::service(?Send)]` to allow non-Send futures. This is useful
+/// when your async methods hold non-Send types across await points:
+///
+/// ```ignore
+/// #[rrpc::service(?Send)]
+/// pub trait LocalWorker: 'static {
+///     async fn run_task(&self, task: Task) -> Result<Output, Error>;
+/// }
+/// ```
+///
+/// Note: `?Send` services require a single-threaded runtime for the server.
 #[proc_macro_attribute]
-pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
     let trait_def = parse_macro_input!(item as ItemTrait);
-    match generate_service(&trait_def) {
+    let not_send = attr.to_string().contains("?Send");
+    match generate_service(&trait_def, not_send) {
         Ok(tokens) => tokens.into(),
         Err(e) => e.to_compile_error().into(),
     }
 }
 
-fn generate_service(trait_def: &ItemTrait) -> syn::Result<TokenStream2> {
+fn generate_service(trait_def: &ItemTrait, not_send: bool) -> syn::Result<TokenStream2> {
     let trait_name = &trait_def.ident;
     let trait_vis = &trait_def.vis;
     let trait_name_lower = to_snake_case(&trait_name.to_string());
-    let serve_fn_name = format_ident!("serve_{}", trait_name_lower);
     let mod_name = format_ident!("__{}_rpc_impl", trait_name_lower);
 
     // Collect method info
@@ -91,8 +105,48 @@ fn generate_service(trait_def: &ItemTrait) -> syn::Result<TokenStream2> {
     let trait_supertraits = &trait_def.supertraits;
     let trait_generics = &trait_def.generics;
 
+    // Choose async_trait attribute based on Send requirement
+    let async_trait_attr = if not_send {
+        quote! { #[::rrpc::async_trait(?Send)] }
+    } else {
+        quote! { #[::rrpc::async_trait] }
+    };
+
+    // Dispatch function return type depends on Send requirement
+    let dispatch_fn = if not_send {
+        quote! {
+            pub fn dispatch<'a, T: #trait_name + ?Sized>(
+                service: &'a T,
+                method_id: u16,
+                payload: &'a [u8],
+            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::anyhow::Result<Vec<u8>>> + 'a>> {
+                Box::pin(async move {
+                    match method_id {
+                        #(#dispatch_arms)*
+                        _ => ::anyhow::bail!("Unknown method ID: {}", method_id),
+                    }
+                })
+            }
+        }
+    } else {
+        quote! {
+            pub fn dispatch<'a, T: #trait_name + ?Sized>(
+                service: &'a T,
+                method_id: u16,
+                payload: &'a [u8],
+            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::anyhow::Result<Vec<u8>>> + Send + 'a>> {
+                Box::pin(async move {
+                    match method_id {
+                        #(#dispatch_arms)*
+                        _ => ::anyhow::bail!("Unknown method ID: {}", method_id),
+                    }
+                })
+            }
+        }
+    };
+
     Ok(quote! {
-        #[::rrpc::async_trait]
+        #async_trait_attr
         #trait_vis trait #trait_name #trait_generics : #trait_supertraits {
             #(#trait_items)*
         }
@@ -106,28 +160,21 @@ fn generate_service(trait_def: &ItemTrait) -> syn::Result<TokenStream2> {
             #(#method_ids)*
 
             // Dispatch function for the server
-            pub fn dispatch<'a, T: #trait_name>(
-                service: &'a T,
-                method_id: u16,
-                payload: &'a [u8],
-            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::anyhow::Result<Vec<u8>>> + Send + 'a>> {
-                Box::pin(async move {
-                    match method_id {
-                        #(#dispatch_arms)*
-                        _ => ::anyhow::bail!("Unknown method ID: {}", method_id),
-                    }
-                })
-            }
+            #dispatch_fn
         }
 
-        /// Create a server for the #trait_name service.
-        #trait_vis fn #serve_fn_name<T: #trait_name>(service: T) -> ::rrpc::Server<T> {
-            ::rrpc::Server::new(service, #mod_name::dispatch)
-        }
-
-        #[::rrpc::async_trait]
+        #async_trait_attr
         impl #trait_name for ::rrpc::Client<dyn #trait_name> {
             #(#client_impl_methods)*
+        }
+
+        /// Extension trait for creating servers from service implementations.
+        impl dyn #trait_name {
+            /// Create a server that hosts this service.
+            #trait_vis fn serve<T: #trait_name + 'static>(service: T) -> ::rrpc::Server<dyn #trait_name> {
+                let service: ::std::sync::Arc<dyn #trait_name> = ::std::sync::Arc::new(service);
+                ::rrpc::Server::from_arc(service, #mod_name::dispatch)
+            }
         }
     })
 }

@@ -16,7 +16,7 @@ pub trait Worker: Send + Sync + 'static {
 
 The macro generates:
 - `impl Worker for Client<dyn Worker>` — call methods directly on the client
-- `serve_worker(impl Worker) -> Server<T>` — wrap any implementation in a server
+- `<dyn Worker>::serve(impl)` — wrap any implementation in a server
 
 ## Usage
 
@@ -57,7 +57,7 @@ impl VmManager for MyVmManager {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let server = serve_vm_manager(MyVmManager::new());
+    let server = <dyn VmManager>::serve(MyVmManager::new());
     server.listen("0.0.0.0:9000").await
 }
 ```

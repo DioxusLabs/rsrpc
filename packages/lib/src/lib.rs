@@ -12,10 +12,10 @@
 //! }
 //!
 //! // Server
-//! let server = serve_worker(my_worker);
+//! let server = <dyn Worker>::serve(my_worker);
 //! server.listen("0.0.0.0:9000").await?;
 //!
-//! // Client - same method signatures!
+//! // Client
 //! let client: Client<dyn Worker> = Client::connect("10.0.0.5:9000").await?;
 //! client.run_task(task).await?;
 //! ```
@@ -177,20 +177,18 @@ pub type DispatchFn<T> = for<'a> fn(
 ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>>;
 
 /// A server that hosts an RPC service implementation.
-pub struct Server<T> {
+///
+/// Use `<dyn MyTrait>::serve(impl)` to create a server.
+pub struct Server<T: ?Sized> {
     service: Arc<T>,
     dispatch: DispatchFn<T>,
 }
 
-impl<T: Send + Sync + 'static> Server<T> {
-    /// Create a new server with the given service implementation and dispatch function.
-    ///
-    /// This is typically called by generated code from `#[rrpc::service]`.
-    pub fn new(service: T, dispatch: DispatchFn<T>) -> Self {
-        Self {
-            service: Arc::new(service),
-            dispatch,
-        }
+impl<T: ?Sized + Send + Sync + 'static> Server<T> {
+    /// Create a server from an Arc'd service and dispatch function.
+    /// Typically you should use `<dyn MyTrait>::serve(impl)` instead.
+    pub fn from_arc(service: Arc<T>, dispatch: DispatchFn<T>) -> Self {
+        Self { service, dispatch }
     }
 
     /// Listen for incoming connections on the given address.

@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
 
             // Create and run server
             println!("\nStarting server on 127.0.0.1:{port}...");
-            let server = serve_vm_manager(manager);
+            let server = <dyn VmManager>::serve(manager);
             server.listen(&format!("127.0.0.1:{port}")).await?;
         }
         "client" => {

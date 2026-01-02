@@ -19,30 +19,30 @@ Build an ergonomic, function-forward RPC library for Rust-to-Rust communication.
 - **gRPC/tonic**: Overkill for pure Rust, cross-language schema not needed
 - **Raw WebSocket**: Too low-level, have to build dispatch/correlation yourself
 
-## Current Implementation (rpc_lib.rs)
+## Current Implementation
 
-Working prototype with:
+Working implementation with:
 - `Server<T>` - wraps service impl, handles TCP connections
-- `Client<S>` - connects to remote, provides `call` method
+- `Client<T>` - connects to remote, implements the service trait
+- `#[rrpc::service]` - proc macro that generates client/server glue
 - Wire format: `[method_id: u16][request_id: u64][payload_len: u32][payload]`
-- Uses `postcard` for serialization (could swap for `rkyv`)
-- Example `Worker` trait showing the pattern
+- Uses `postcard` for serialization
 
-### What the macro should generate (currently handwritten):
+### What the macro generates:
 - Per-method request structs (private)
 - Method ID constants (private)
 - Dispatch function that routes by method ID
 - `impl MyTrait for Client<dyn MyTrait>`
-- Helper function `serve_mytrait(impl) -> Server<T>`
+- `<dyn MyTrait>::serve(impl) -> Server<dyn MyTrait>`
 
 ## Next Steps
 
-1. **Write the proc macro** - `#[rpc::service]` that generates the glue code from a trait definition
-2. **Error handling** - Currently uses `.unwrap()`, need proper error propagation
+1. ~~**Write the proc macro**~~ - Done: `#[rrpc::service]` generates glue code from trait definition
+2. ~~**Error handling**~~ - Done: errors converted to strings for wire transport
 3. **Connection management** - Reconnection, health checks, timeouts
 4. **Streaming support** - Methods returning `impl Stream<Item = T>`
 5. **Bidirectional** - Server-initiated calls to workers
-6. **Testing** - Get the existing tests passing, add more coverage
+6. **Testing** - Add integration tests, edge case coverage
 
 ## Architecture Decisions Made
 
@@ -63,8 +63,9 @@ Working prototype with:
 
 ## Files
 
-- `rpc_lib.rs` - Single-file library with example Worker trait
-- `Cargo.toml` - Dependencies: tokio, serde, postcard
+- `packages/lib/src/lib.rs` - Core library (Client, Server, wire protocol)
+- `packages/macro/src/lib.rs` - Proc macro implementation
+- `examples/demo.rs` - Working example with VmManager trait
 
 ## Example of Target API
 
@@ -87,7 +88,7 @@ impl Worker for MyWorker {
 }
 
 // Server
-let server: Server<MyWorker> = serve_worker(my_worker);
+let server = <dyn Worker>::serve(my_worker);
 server.listen("0.0.0.0:9000").await?;
 
 // Client - same method signatures!

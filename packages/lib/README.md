@@ -1,5 +1,11 @@
 # rsrpc
 
+[![Crates.io](https://img.shields.io/crates/v/rsrpc.svg)](https://crates.io/crates/rsrpc)
+[![Documentation](https://docs.rs/rsrpc/badge.svg)](https://docs.rs/rsrpc)
+[![CI](https://github.com/dioxuslabs/rsrpc/actions/workflows/ci.yml/badge.svg)](https://github.com/dioxuslabs/rsrpc/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/dioxuslabs/rsrpc/blob/main/LICENSE)
+[![Rust Version](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+
 Ergonomic Rust-to-Rust RPC where the trait is the API.
 
 ## Overview

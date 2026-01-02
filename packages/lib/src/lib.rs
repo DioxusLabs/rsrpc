@@ -22,12 +22,12 @@
 //!
 //! # Streaming
 //!
-//! Methods can return `RpcStream<T>` for server-side streaming:
+//! Methods returning `Result<RpcStream<T>>` automatically stream data:
 //!
 //! ```ignore
 //! #[rrpc::service]
 //! pub trait LogService: Send + Sync + 'static {
-//!     async fn stream_logs(&self, filter: Filter) -> RpcStream<LogEntry>;
+//!     async fn stream_logs(&self, filter: Filter) -> Result<RpcStream<LogEntry>>;
 //! }
 //! ```
 
@@ -65,6 +65,46 @@ pub trait IntoWireResult<T> {
 impl<T, E: std::fmt::Display> IntoWireResult<T> for Result<T, E> {
     fn into_wire_result(self) -> Result<T, String> {
         self.map_err(|e| e.to_string())
+    }
+}
+
+/// Result from dispatching a method call.
+/// Can be either a unary response or a stream of items.
+pub enum DispatchResult {
+    /// Unary response - single serialized payload
+    Unary(Vec<u8>),
+    /// Streaming response - boxed stream that yields serialized items
+    Stream(Box<dyn ErasedStream + Send>),
+    /// Error during dispatch
+    Error(String),
+}
+
+/// Type-erased stream trait for dispatch results.
+pub trait ErasedStream {
+    /// Get the next item as serialized bytes.
+    fn poll_next_bytes(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Vec<u8>, String>>>;
+}
+
+impl<T: Serialize + Unpin> ErasedStream for RpcStream<T> {
+    fn poll_next_bytes(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Vec<u8>, String>>> {
+        use futures_core::Stream;
+        use std::task::Poll;
+
+        match Stream::poll_next(self, cx) {
+            Poll::Ready(Some(Ok(item))) => match postcard::to_allocvec(&item) {
+                Ok(bytes) => Poll::Ready(Some(Ok(bytes))),
+                Err(e) => Poll::Ready(Some(Err(e.to_string()))),
+            },
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -257,27 +297,23 @@ impl<T: ?Sized + 'static> Client<T> {
         tokio::spawn(async move {
             while let Some(frame) = frame_rx.recv().await {
                 match frame.frame_type {
-                    FrameType::StreamItem => {
-                        match postcard::from_bytes::<Item>(&frame.payload) {
-                            Ok(item) => {
-                                if item_tx.send(Ok(item)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                let _ = item_tx.send(Err(e.to_string())).await;
+                    FrameType::StreamItem => match postcard::from_bytes::<Item>(&frame.payload) {
+                        Ok(item) => {
+                            if item_tx.send(Ok(item)).await.is_err() {
                                 break;
                             }
                         }
-                    }
+                        Err(e) => {
+                            let _ = item_tx.send(Err(e.to_string())).await;
+                            break;
+                        }
+                    },
                     FrameType::StreamEnd => {
                         break;
                     }
                     FrameType::StreamError => {
-                        let error: String =
-                            postcard::from_bytes(&frame.payload).unwrap_or_else(|_| {
-                                "Unknown stream error".to_string()
-                            });
+                        let error: String = postcard::from_bytes(&frame.payload)
+                            .unwrap_or_else(|_| "Unknown stream error".to_string());
                         let _ = item_tx.send(Err(error)).await;
                         break;
                     }
@@ -377,12 +413,12 @@ impl ClientStreamSender {
 }
 
 /// Type alias for dispatch handler functions.
-/// Takes (service, method_id, payload) and returns serialized response.
+/// Takes (service, method_id, payload) and returns either unary or streaming result.
 pub type DispatchFn<T> = for<'a> fn(
     &'a T,
     u16,
     &'a [u8],
-) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>>;
+) -> Pin<Box<dyn Future<Output = DispatchResult> + Send + 'a>>;
 
 /// A server that hosts an RPC service implementation.
 ///
@@ -447,34 +483,127 @@ impl<T: ?Sized + Send + Sync + 'static> Server<T> {
 
             match frame_type {
                 FrameType::Request => {
-                    // Unary request - dispatch and send response
-                    let response_result = dispatch(&service, method_id, &payload).await;
+                    let dispatch_result = dispatch(&service, method_id, &payload).await;
+                    let writer = Arc::clone(&writer);
 
-                    // Serialize response
-                    let response_payload = match response_result {
-                        Ok(data) => data,
-                        Err(e) => postcard::to_allocvec(&Err::<(), _>(e.to_string()))?,
-                    };
+                    match dispatch_result {
+                        DispatchResult::Unary(response_payload) => {
+                            // Send unary response
+                            let response_header = encode_stream_header(
+                                FrameType::Response,
+                                method_id,
+                                request_id,
+                                response_payload.len() as u32,
+                            );
 
-                    // Send response with Response frame type
-                    let response_header = encode_stream_header(
-                        FrameType::Response,
-                        method_id,
-                        request_id,
-                        response_payload.len() as u32,
-                    );
+                            let mut response =
+                                Vec::with_capacity(STREAM_HEADER_SIZE + response_payload.len());
+                            response.extend_from_slice(&response_header);
+                            response.extend_from_slice(&response_payload);
 
-                    let mut response =
-                        Vec::with_capacity(STREAM_HEADER_SIZE + response_payload.len());
-                    response.extend_from_slice(&response_header);
-                    response.extend_from_slice(&response_payload);
+                            writer.lock().await.write_all(&response).await?;
+                        }
+                        DispatchResult::Stream(stream) => {
+                            // Spawn task to send stream items
+                            tokio::spawn(async move {
+                                use std::future::poll_fn;
+                                use std::pin::Pin;
 
-                    writer.lock().await.write_all(&response).await?;
+                                // Pin the stream for polling
+                                let mut stream = stream;
+
+                                loop {
+                                    let item = poll_fn(|cx| {
+                                        // SAFETY: The stream is boxed and we never move it
+                                        let pinned = unsafe {
+                                            Pin::new_unchecked(&mut *stream)
+                                        };
+                                        pinned.poll_next_bytes(cx)
+                                    })
+                                    .await;
+
+                                    match item {
+                                        Some(Ok(item_bytes)) => {
+                                            let header = encode_stream_header(
+                                                FrameType::StreamItem,
+                                                method_id,
+                                                request_id,
+                                                item_bytes.len() as u32,
+                                            );
+
+                                            let mut message = Vec::with_capacity(
+                                                STREAM_HEADER_SIZE + item_bytes.len(),
+                                            );
+                                            message.extend_from_slice(&header);
+                                            message.extend_from_slice(&item_bytes);
+
+                                            if writer.lock().await.write_all(&message).await.is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
+                                        Some(Err(e)) => {
+                                            // Send error and end stream
+                                            let error_bytes =
+                                                postcard::to_allocvec(&e).unwrap_or_default();
+                                            let header = encode_stream_header(
+                                                FrameType::StreamError,
+                                                method_id,
+                                                request_id,
+                                                error_bytes.len() as u32,
+                                            );
+
+                                            let mut message = Vec::with_capacity(
+                                                STREAM_HEADER_SIZE + error_bytes.len(),
+                                            );
+                                            message.extend_from_slice(&header);
+                                            message.extend_from_slice(&error_bytes);
+
+                                            let _ = writer.lock().await.write_all(&message).await;
+                                            break;
+                                        }
+                                        None => {
+                                            // Stream ended - send StreamEnd
+                                            let header = encode_stream_header(
+                                                FrameType::StreamEnd,
+                                                method_id,
+                                                request_id,
+                                                0,
+                                            );
+
+                                            let _ = writer.lock().await.write_all(&header).await;
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        DispatchResult::Error(e) => {
+                            // Send error as unary response
+                            let response_payload =
+                                postcard::to_allocvec(&Err::<(), _>(e.to_string()))?;
+                            let response_header = encode_stream_header(
+                                FrameType::Response,
+                                method_id,
+                                request_id,
+                                response_payload.len() as u32,
+                            );
+
+                            let mut response =
+                                Vec::with_capacity(STREAM_HEADER_SIZE + response_payload.len());
+                            response.extend_from_slice(&response_header);
+                            response.extend_from_slice(&response_payload);
+
+                            writer.lock().await.write_all(&response).await?;
+                        }
+                    }
                 }
                 FrameType::StreamItem | FrameType::StreamEnd | FrameType::StreamError => {
                     // Client-side streaming frames - would need stream handler registration
-                    // For now, these are handled by streaming dispatch handlers
-                    eprintln!("Server received stream frame (not yet routed): {:?}", frame_type);
+                    eprintln!(
+                        "Server received stream frame (not yet routed): {:?}",
+                        frame_type
+                    );
                 }
                 FrameType::Response => {
                     // Server shouldn't receive Response frames

@@ -2,7 +2,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, FnArg, Ident, ItemTrait, Pat, ReturnType, TraitItem, TraitItemFn, Type,
+    parse_macro_input, FnArg, GenericArgument, Ident, ItemTrait, Pat, PathArguments, ReturnType,
+    TraitItem, TraitItemFn, Type,
 };
 
 /// Marks a trait as an RPC service.
@@ -23,6 +24,18 @@ use syn::{
 ///
 /// // Client: impl Worker for Client<dyn Worker>
 /// // Server: <dyn Worker>::serve(my_impl)
+/// ```
+///
+/// # Streaming
+///
+/// Methods returning `Result<RpcStream<T>>` are automatically handled as
+/// server-side streaming:
+///
+/// ```ignore
+/// #[rrpc::service]
+/// pub trait LogService: Send + Sync + 'static {
+///     async fn stream_logs(&self, filter: Filter) -> Result<RpcStream<LogEntry>>;
+/// }
 /// ```
 ///
 /// # Local (non-Send) services
@@ -119,11 +132,11 @@ fn generate_service(trait_def: &ItemTrait, not_send: bool) -> syn::Result<TokenS
                 service: &'a T,
                 method_id: u16,
                 payload: &'a [u8],
-            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::anyhow::Result<Vec<u8>>> + 'a>> {
+            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::rrpc::DispatchResult> + 'a>> {
                 Box::pin(async move {
                     match method_id {
                         #(#dispatch_arms)*
-                        _ => ::anyhow::bail!("Unknown method ID: {}", method_id),
+                        _ => ::rrpc::DispatchResult::Error(format!("Unknown method ID: {}", method_id)),
                     }
                 })
             }
@@ -134,11 +147,11 @@ fn generate_service(trait_def: &ItemTrait, not_send: bool) -> syn::Result<TokenS
                 service: &'a T,
                 method_id: u16,
                 payload: &'a [u8],
-            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::anyhow::Result<Vec<u8>>> + Send + 'a>> {
+            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::rrpc::DispatchResult> + Send + 'a>> {
                 Box::pin(async move {
                     match method_id {
                         #(#dispatch_arms)*
-                        _ => ::anyhow::bail!("Unknown method ID: {}", method_id),
+                        _ => ::rrpc::DispatchResult::Error(format!("Unknown method ID: {}", method_id)),
                     }
                 })
             }
@@ -183,6 +196,7 @@ struct MethodInfo {
     name: Ident,
     args: Vec<(Ident, Type)>, // (name, type) excluding self
     return_type: Type,
+    stream_item_type: Option<Type>, // Some(T) if return type is Result<RpcStream<T>>
 }
 
 fn parse_method(method: &TraitItemFn) -> syn::Result<MethodInfo> {
@@ -209,11 +223,58 @@ fn parse_method(method: &TraitItemFn) -> syn::Result<MethodInfo> {
         ReturnType::Type(_, ty) => (**ty).clone(),
     };
 
+    // Check if return type is Result<RpcStream<T>> or RpcStream<T>
+    let stream_item_type = extract_stream_item_type(&return_type);
+
     Ok(MethodInfo {
         name,
         args,
         return_type,
+        stream_item_type,
     })
+}
+
+/// Extract the inner type T from Result<RpcStream<T>> or RpcStream<T>
+fn extract_stream_item_type(ty: &Type) -> Option<Type> {
+    // Try to match Result<RpcStream<T>, _>
+    if let Some(inner) = extract_result_ok_type(ty) {
+        if let Some(item_type) = extract_rpc_stream_type(&inner) {
+            return Some(item_type);
+        }
+    }
+
+    // Try to match RpcStream<T> directly
+    extract_rpc_stream_type(ty)
+}
+
+/// Extract T from Result<T, _>
+fn extract_result_ok_type(ty: &Type) -> Option<Type> {
+    if let Type::Path(type_path) = ty {
+        let segment = type_path.path.segments.last()?;
+        if segment.ident == "Result" {
+            if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
+                    return Some(inner_ty.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract T from RpcStream<T>
+fn extract_rpc_stream_type(ty: &Type) -> Option<Type> {
+    if let Type::Path(type_path) = ty {
+        let segment = type_path.path.segments.last()?;
+        if segment.ident == "RpcStream" {
+            if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                if let Some(GenericArgument::Type(inner_ty)) = args.args.first() {
+                    return Some(inner_ty.clone());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn generate_request_struct(method: &MethodInfo) -> TokenStream2 {
@@ -252,24 +313,53 @@ fn generate_client_method(method: &MethodInfo, method_id: u16) -> TokenStream2 {
         .map(|(name, ty)| quote! { #name: #ty })
         .collect();
 
-    if arg_names.is_empty() {
-        quote! {
-            async fn #name(&self) -> #return_type {
-                self.call(#method_id, &()).await
+    // Check if this is a streaming method
+    if let Some(item_type) = &method.stream_item_type {
+        // Streaming method - use call_stream
+        if arg_names.is_empty() {
+            quote! {
+                async fn #name(&self) -> #return_type {
+                    self.call_stream::<(), #item_type>(#method_id, &()).await
+                        .map_err(|e| ::anyhow::anyhow!("{}", e))
+                }
+            }
+        } else {
+            let request_fields: Vec<TokenStream2> = method
+                .args
+                .iter()
+                .map(|(name, ty)| quote! { #name: #ty })
+                .collect();
+
+            quote! {
+                async fn #name(&self, #(#arg_decls),*) -> #return_type {
+                    #[derive(::rrpc::serde::Serialize)]
+                    struct __Request { #(#request_fields),* }
+                    self.call_stream::<__Request, #item_type>(#method_id, &__Request { #(#arg_names),* }).await
+                        .map_err(|e| ::anyhow::anyhow!("{}", e))
+                }
             }
         }
     } else {
-        let request_fields: Vec<TokenStream2> = method
-            .args
-            .iter()
-            .map(|(name, ty)| quote! { #name: #ty })
-            .collect();
+        // Unary method - use call
+        if arg_names.is_empty() {
+            quote! {
+                async fn #name(&self) -> #return_type {
+                    self.call(#method_id, &()).await
+                }
+            }
+        } else {
+            let request_fields: Vec<TokenStream2> = method
+                .args
+                .iter()
+                .map(|(name, ty)| quote! { #name: #ty })
+                .collect();
 
-        quote! {
-            async fn #name(&self, #(#arg_decls),*) -> #return_type {
-                #[derive(::rrpc::serde::Serialize)]
-                struct __Request { #(#request_fields),* }
-                self.call(#method_id, &__Request { #(#arg_names),* }).await
+            quote! {
+                async fn #name(&self, #(#arg_decls),*) -> #return_type {
+                    #[derive(::rrpc::serde::Serialize)]
+                    struct __Request { #(#request_fields),* }
+                    self.call(#method_id, &__Request { #(#arg_names),* }).await
+                }
             }
         }
     }
@@ -280,27 +370,61 @@ fn generate_dispatch_arm(method: &MethodInfo, method_id: u16) -> TokenStream2 {
     let request_struct = format_ident!("{}Request", to_pascal_case(&name.to_string()));
     let arg_names: Vec<&Ident> = method.args.iter().map(|(n, _)| n).collect();
 
-    // Use IntoWireResult to convert Result<T, E> to Result<T, String> for wire serialization
-    // This allows any error type (including anyhow::Error) to be sent over the wire
-    if arg_names.is_empty() {
-        quote! {
-            #method_id => {
-                use ::rrpc::IntoWireResult;
-                let result = service.#name().await;
-                let wire_result = result.into_wire_result();
-                let serialized = ::rrpc::postcard::to_allocvec(&wire_result)?;
-                Ok(serialized)
+    // Check if this is a streaming method
+    if method.stream_item_type.is_some() {
+        // Streaming dispatch - return DispatchResult::Stream
+        if arg_names.is_empty() {
+            quote! {
+                #method_id => {
+                    match service.#name().await {
+                        Ok(stream) => ::rrpc::DispatchResult::Stream(Box::new(stream)),
+                        Err(e) => ::rrpc::DispatchResult::Error(e.to_string()),
+                    }
+                }
+            }
+        } else {
+            quote! {
+                #method_id => {
+                    let req: #request_struct = match ::rrpc::postcard::from_bytes(payload) {
+                        Ok(r) => r,
+                        Err(e) => return ::rrpc::DispatchResult::Error(e.to_string()),
+                    };
+                    match service.#name(#(req.#arg_names),*).await {
+                        Ok(stream) => ::rrpc::DispatchResult::Stream(Box::new(stream)),
+                        Err(e) => ::rrpc::DispatchResult::Error(e.to_string()),
+                    }
+                }
             }
         }
     } else {
-        quote! {
-            #method_id => {
-                use ::rrpc::IntoWireResult;
-                let req: #request_struct = ::rrpc::postcard::from_bytes(payload)?;
-                let result = service.#name(#(req.#arg_names),*).await;
-                let wire_result = result.into_wire_result();
-                let serialized = ::rrpc::postcard::to_allocvec(&wire_result)?;
-                Ok(serialized)
+        // Unary dispatch - return DispatchResult::Unary
+        if arg_names.is_empty() {
+            quote! {
+                #method_id => {
+                    use ::rrpc::IntoWireResult;
+                    let result = service.#name().await;
+                    let wire_result = result.into_wire_result();
+                    match ::rrpc::postcard::to_allocvec(&wire_result) {
+                        Ok(serialized) => ::rrpc::DispatchResult::Unary(serialized),
+                        Err(e) => ::rrpc::DispatchResult::Error(e.to_string()),
+                    }
+                }
+            }
+        } else {
+            quote! {
+                #method_id => {
+                    use ::rrpc::IntoWireResult;
+                    let req: #request_struct = match ::rrpc::postcard::from_bytes(payload) {
+                        Ok(r) => r,
+                        Err(e) => return ::rrpc::DispatchResult::Error(e.to_string()),
+                    };
+                    let result = service.#name(#(req.#arg_names),*).await;
+                    let wire_result = result.into_wire_result();
+                    match ::rrpc::postcard::to_allocvec(&wire_result) {
+                        Ok(serialized) => ::rrpc::DispatchResult::Unary(serialized),
+                        Err(e) => ::rrpc::DispatchResult::Error(e.to_string()),
+                    }
+                }
             }
         }
     }

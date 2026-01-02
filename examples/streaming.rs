@@ -32,8 +32,8 @@ pub struct LogFilter {
 
 /// A log streaming service.
 ///
-/// Note: For now, streaming methods need manual implementation on both sides.
-/// The macro generates unary call support; streaming is opt-in.
+/// Methods returning `Result<RpcStream<T>>` are automatically handled
+/// as streaming calls by the macro.
 #[rrpc::service]
 pub trait LogService: Send + Sync + 'static {
     /// Get server info (unary call).
@@ -41,6 +41,9 @@ pub trait LogService: Send + Sync + 'static {
 
     /// Get total log count (unary call).
     async fn get_log_count(&self) -> Result<u64>;
+
+    /// Stream log entries matching the filter (streaming call).
+    async fn stream_logs(&self, filter: LogFilter) -> Result<RpcStream<LogEntry>>;
 }
 
 // =============================================================================
@@ -108,10 +111,19 @@ impl LogServer {
         ];
         Self { logs }
     }
+}
 
-    /// Stream logs to a client using StreamBuilder.
-    /// This is called manually since streaming isn't auto-generated yet.
-    pub async fn stream_logs(&self, filter: LogFilter) -> RpcStream<LogEntry> {
+#[async_trait]
+impl LogService for LogServer {
+    async fn get_info(&self) -> Result<String> {
+        Ok("LogService v1.0 - Streaming enabled".into())
+    }
+
+    async fn get_log_count(&self) -> Result<u64> {
+        Ok(self.logs.len() as u64)
+    }
+
+    async fn stream_logs(&self, filter: LogFilter) -> Result<RpcStream<LogEntry>> {
         let (builder, stream) = StreamBuilder::<LogEntry>::new(16);
 
         // Filter logs
@@ -141,18 +153,7 @@ impl LogServer {
             // Stream ends when builder is dropped
         });
 
-        stream
-    }
-}
-
-#[async_trait]
-impl LogService for LogServer {
-    async fn get_info(&self) -> Result<String> {
-        Ok("LogService v1.0 - Streaming enabled".into())
-    }
-
-    async fn get_log_count(&self) -> Result<u64> {
-        Ok(self.logs.len() as u64)
+        Ok(stream)
     }
 }
 
@@ -170,26 +171,7 @@ async fn main() -> Result<()> {
         "server" => {
             let server = LogServer::new();
 
-            // Test streaming locally first
-            println!("Testing local streaming:");
-            let filter = LogFilter {
-                min_level: "INFO".into(),
-                limit: Some(5),
-            };
-            let mut stream = server.stream_logs(filter).await;
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(entry) => println!("  [{:>5}] {}", entry.level, entry.message),
-                    Err(e) => eprintln!("  Error: {}", e),
-                }
-            }
-            println!();
-
-            // Start the RPC server
             println!("Starting server on 127.0.0.1:{port}...");
-            println!("Note: Full streaming over RPC requires additional dispatch support.");
-            println!("This example shows the streaming primitives in action.\n");
-
             let rpc_server = <dyn LogService>::serve(server);
             rpc_server.listen(&format!("127.0.0.1:{port}")).await?;
         }
@@ -203,10 +185,23 @@ async fn main() -> Result<()> {
             println!("Server info: {}", info);
 
             let count = client.get_log_count().await?;
-            println!("Total logs on server: {}", count);
+            println!("Total logs on server: {}\n", count);
 
-            println!("\nNote: Full streaming over RPC is demonstrated in the server.");
-            println!("The client can receive streams once dispatch is extended.");
+            // Test streaming call
+            println!("Streaming logs (INFO level, limit 5):");
+            let filter = LogFilter {
+                min_level: "INFO".into(),
+                limit: Some(5),
+            };
+
+            let mut stream = client.stream_logs(filter).await?;
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(entry) => println!("  [{:>5}] {}", entry.level, entry.message),
+                    Err(e) => eprintln!("  Error: {}", e),
+                }
+            }
+            println!("\nStream completed!");
         }
         _ => {
             println!("Usage: cargo run --example streaming -- [server|client]");

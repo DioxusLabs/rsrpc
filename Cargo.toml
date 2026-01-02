@@ -18,3 +18,13 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[dependencies]
+rrpc = { path = "packages/lib" }
+tokio = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
+

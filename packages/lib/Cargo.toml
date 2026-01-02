@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rrpc-macro = { path = "../macro" }
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
-postcard = { workspace = true }
+postcard = { workspace = true, features = ["alloc"] }
 uuid = { workspace = true, features = ["v4"] }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

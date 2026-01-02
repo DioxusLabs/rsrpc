@@ -19,6 +19,20 @@
 //! let client: Client<dyn Worker> = Client::connect("10.0.0.5:9000").await?;
 //! client.run_task(task).await?;
 //! ```
+//!
+//! # Streaming
+//!
+//! Methods can return `RpcStream<T>` for server-side streaming:
+//!
+//! ```ignore
+//! #[rrpc::service]
+//! pub trait LogService: Send + Sync + 'static {
+//!     async fn stream_logs(&self, filter: Filter) -> RpcStream<LogEntry>;
+//! }
+//! ```
+
+mod stream;
+pub use stream::*;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -32,7 +46,7 @@ use bytes::Bytes;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// Re-export the service macro
 pub use rrpc_macro::service;
@@ -54,9 +68,6 @@ impl<T, E: std::fmt::Display> IntoWireResult<T> for Result<T, E> {
     }
 }
 
-/// Wire format header size: method_id(2) + request_id(8) + payload_len(4) = 14 bytes
-const HEADER_SIZE: usize = 14;
-
 /// A client connection to a remote RPC server.
 ///
 /// The magic: `Client<dyn MyTrait>` implements `MyTrait`, so you can call
@@ -66,9 +77,23 @@ pub struct Client<T: ?Sized> {
     _marker: PhantomData<T>,
 }
 
+/// Internal state for pending requests
+enum PendingRequest {
+    /// Unary request waiting for single response
+    Unary(oneshot::Sender<Bytes>),
+    /// Streaming request receiving multiple items
+    Stream(mpsc::Sender<StreamFrame>),
+}
+
+/// A frame received for a streaming response
+pub struct StreamFrame {
+    pub frame_type: FrameType,
+    pub payload: Bytes,
+}
+
 struct ClientInner {
     writer: Mutex<tokio::io::WriteHalf<TcpStream>>,
-    pending: Mutex<HashMap<u64, oneshot::Sender<Bytes>>>,
+    pending: Mutex<HashMap<u64, PendingRequest>>,
     next_request_id: AtomicU64,
 }
 
@@ -112,34 +137,67 @@ impl<T: ?Sized + 'static> Client<T> {
         mut reader: tokio::io::ReadHalf<TcpStream>,
     ) -> Result<()> {
         loop {
-            // Read header
-            let mut header = [0u8; HEADER_SIZE];
+            // Read header (15 bytes with frame type)
+            let mut header = [0u8; STREAM_HEADER_SIZE];
             if reader.read_exact(&mut header).await.is_err() {
                 break; // Connection closed
             }
 
-            let _method_id = u16::from_le_bytes([header[0], header[1]]);
-            let request_id = u64::from_le_bytes([
-                header[2], header[3], header[4], header[5], header[6], header[7], header[8],
-                header[9],
-            ]);
-            let payload_len = u32::from_le_bytes([header[10], header[11], header[12], header[13]]);
+            let Some((frame_type, _method_id, request_id, payload_len)) =
+                decode_stream_header(&header)
+            else {
+                eprintln!("Invalid frame type received");
+                continue;
+            };
 
             // Read payload
             let mut payload = vec![0u8; payload_len as usize];
             reader.read_exact(&mut payload).await?;
+            let payload = Bytes::from(payload);
 
-            // Dispatch to waiting caller - convert to Bytes for cheap cloning
-            let sender = inner.pending.lock().await.remove(&request_id);
-            if let Some(tx) = sender {
-                let _ = tx.send(Bytes::from(payload));
+            // Dispatch based on request type
+            let mut pending = inner.pending.lock().await;
+
+            match frame_type {
+                FrameType::Response => {
+                    // Unary response - remove and complete
+                    if let Some(PendingRequest::Unary(tx)) = pending.remove(&request_id) {
+                        let _ = tx.send(payload);
+                    }
+                }
+                FrameType::StreamItem => {
+                    // Stream item - send to stream channel
+                    if let Some(PendingRequest::Stream(tx)) = pending.get(&request_id) {
+                        let _ = tx
+                            .send(StreamFrame {
+                                frame_type,
+                                payload,
+                            })
+                            .await;
+                    }
+                }
+                FrameType::StreamEnd | FrameType::StreamError => {
+                    // Stream completed or errored - send final frame and remove
+                    if let Some(PendingRequest::Stream(tx)) = pending.remove(&request_id) {
+                        let _ = tx
+                            .send(StreamFrame {
+                                frame_type,
+                                payload,
+                            })
+                            .await;
+                    }
+                }
+                FrameType::Request => {
+                    // Client shouldn't receive Request frames
+                    eprintln!("Client received unexpected Request frame");
+                }
             }
         }
         Ok(())
     }
 
     /// Low-level call method used by generated trait impls.
-    /// Sends a request and waits for the response.
+    /// Sends a request and waits for a unary response.
     pub async fn call<Req: Serialize, Resp: DeserializeOwned>(
         &self,
         method_id: u16,
@@ -150,13 +208,21 @@ impl<T: ?Sized + 'static> Client<T> {
 
         // Register pending request
         let (tx, rx) = oneshot::channel();
-        self.inner.pending.lock().await.insert(request_id, tx);
+        self.inner
+            .pending
+            .lock()
+            .await
+            .insert(request_id, PendingRequest::Unary(tx));
 
-        // Build and send message
-        let mut message = Vec::with_capacity(HEADER_SIZE + payload.len());
-        message.extend_from_slice(&method_id.to_le_bytes());
-        message.extend_from_slice(&request_id.to_le_bytes());
-        message.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        // Build and send message with frame type
+        let header = encode_stream_header(
+            FrameType::Request,
+            method_id,
+            request_id,
+            payload.len() as u32,
+        );
+        let mut message = Vec::with_capacity(STREAM_HEADER_SIZE + payload.len());
+        message.extend_from_slice(&header);
         message.extend_from_slice(&payload);
 
         self.inner.writer.lock().await.write_all(&message).await?;
@@ -165,6 +231,148 @@ impl<T: ?Sized + 'static> Client<T> {
         let response_payload = rx.await.map_err(|_| anyhow!("Request cancelled"))?;
         let response: Result<Resp, String> = postcard::from_bytes(&response_payload)?;
         response.map_err(|e| anyhow!("{e}"))
+    }
+
+    /// Start a streaming call. Returns a stream of responses.
+    pub async fn call_stream<Req: Serialize, Item: DeserializeOwned + Send + 'static>(
+        &self,
+        method_id: u16,
+        request: &Req,
+    ) -> Result<RpcStream<Item>> {
+        let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let payload = postcard::to_allocvec(request)?;
+
+        // Create channels for stream
+        let (frame_tx, mut frame_rx) = mpsc::channel::<StreamFrame>(32);
+        let (item_tx, item_rx) = mpsc::channel::<Result<Item, String>>(32);
+
+        // Register pending stream
+        self.inner
+            .pending
+            .lock()
+            .await
+            .insert(request_id, PendingRequest::Stream(frame_tx));
+
+        // Spawn task to convert frames to items
+        tokio::spawn(async move {
+            while let Some(frame) = frame_rx.recv().await {
+                match frame.frame_type {
+                    FrameType::StreamItem => {
+                        match postcard::from_bytes::<Item>(&frame.payload) {
+                            Ok(item) => {
+                                if item_tx.send(Ok(item)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                let _ = item_tx.send(Err(e.to_string())).await;
+                                break;
+                            }
+                        }
+                    }
+                    FrameType::StreamEnd => {
+                        break;
+                    }
+                    FrameType::StreamError => {
+                        let error: String =
+                            postcard::from_bytes(&frame.payload).unwrap_or_else(|_| {
+                                "Unknown stream error".to_string()
+                            });
+                        let _ = item_tx.send(Err(error)).await;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // Send request
+        let header = encode_stream_header(
+            FrameType::Request,
+            method_id,
+            request_id,
+            payload.len() as u32,
+        );
+        let mut message = Vec::with_capacity(STREAM_HEADER_SIZE + payload.len());
+        message.extend_from_slice(&header);
+        message.extend_from_slice(&payload);
+
+        self.inner.writer.lock().await.write_all(&message).await?;
+
+        Ok(RpcStream::new(item_rx))
+    }
+
+    /// Get a handle for sending stream items to the server.
+    /// Used for client-side streaming and bidirectional streaming.
+    pub fn stream_sender(&self, method_id: u16, request_id: u64) -> ClientStreamSender {
+        ClientStreamSender {
+            inner: Arc::clone(&self.inner),
+            method_id,
+            request_id,
+        }
+    }
+
+    /// Allocate a new request ID.
+    pub fn next_request_id(&self) -> u64 {
+        self.inner.next_request_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Access the inner writer for advanced use cases.
+    pub fn writer(&self) -> &Mutex<tokio::io::WriteHalf<TcpStream>> {
+        &self.inner.writer
+    }
+}
+
+/// Handle for sending stream items from client to server.
+pub struct ClientStreamSender {
+    inner: Arc<ClientInner>,
+    method_id: u16,
+    request_id: u64,
+}
+
+impl ClientStreamSender {
+    /// Send an item to the server stream.
+    pub async fn send<T: Serialize>(&self, item: &T) -> Result<()> {
+        let payload = postcard::to_allocvec(item)?;
+        let header = encode_stream_header(
+            FrameType::StreamItem,
+            self.method_id,
+            self.request_id,
+            payload.len() as u32,
+        );
+
+        let mut message = Vec::with_capacity(STREAM_HEADER_SIZE + payload.len());
+        message.extend_from_slice(&header);
+        message.extend_from_slice(&payload);
+
+        self.inner.writer.lock().await.write_all(&message).await?;
+        Ok(())
+    }
+
+    /// Signal end of client stream.
+    pub async fn end(&self) -> Result<()> {
+        let header =
+            encode_stream_header(FrameType::StreamEnd, self.method_id, self.request_id, 0);
+        self.inner.writer.lock().await.write_all(&header).await?;
+        Ok(())
+    }
+
+    /// Send an error and end the stream.
+    pub async fn error(&self, err: impl std::fmt::Display) -> Result<()> {
+        let payload = postcard::to_allocvec(&err.to_string())?;
+        let header = encode_stream_header(
+            FrameType::StreamError,
+            self.method_id,
+            self.request_id,
+            payload.len() as u32,
+        );
+
+        let mut message = Vec::with_capacity(STREAM_HEADER_SIZE + payload.len());
+        message.extend_from_slice(&header);
+        message.extend_from_slice(&payload);
+
+        self.inner.writer.lock().await.write_all(&message).await?;
+        Ok(())
     }
 }
 
@@ -216,45 +424,131 @@ impl<T: ?Sized + Send + Sync + 'static> Server<T> {
         service: Arc<T>,
         dispatch: DispatchFn<T>,
     ) -> Result<()> {
-        let (mut reader, mut writer) = tokio::io::split(stream);
+        let (mut reader, writer) = tokio::io::split(stream);
+        let writer = Arc::new(Mutex::new(writer));
 
         loop {
-            // Read header
-            let mut header = [0u8; HEADER_SIZE];
+            // Read header (15 bytes with frame type)
+            let mut header = [0u8; STREAM_HEADER_SIZE];
             if reader.read_exact(&mut header).await.is_err() {
                 break; // Connection closed
             }
 
-            let method_id = u16::from_le_bytes([header[0], header[1]]);
-            let request_id = u64::from_le_bytes([
-                header[2], header[3], header[4], header[5], header[6], header[7], header[8],
-                header[9],
-            ]);
-            let payload_len = u32::from_le_bytes([header[10], header[11], header[12], header[13]]);
+            let Some((frame_type, method_id, request_id, payload_len)) =
+                decode_stream_header(&header)
+            else {
+                eprintln!("Invalid frame type received");
+                continue;
+            };
 
             // Read payload
             let mut payload = vec![0u8; payload_len as usize];
             reader.read_exact(&mut payload).await?;
 
-            // Dispatch to handler
-            let response_result = dispatch(&service, method_id, &payload).await;
+            match frame_type {
+                FrameType::Request => {
+                    // Unary request - dispatch and send response
+                    let response_result = dispatch(&service, method_id, &payload).await;
 
-            // Serialize response (wrap in Result for error propagation)
-            let response_payload = match response_result {
-                Ok(data) => data,
-                Err(e) => postcard::to_allocvec(&Err::<(), _>(e.to_string()))?,
-            };
+                    // Serialize response
+                    let response_payload = match response_result {
+                        Ok(data) => data,
+                        Err(e) => postcard::to_allocvec(&Err::<(), _>(e.to_string()))?,
+                    };
 
-            // Send response
-            let mut response = Vec::with_capacity(HEADER_SIZE + response_payload.len());
-            response.extend_from_slice(&method_id.to_le_bytes());
-            response.extend_from_slice(&request_id.to_le_bytes());
-            response.extend_from_slice(&(response_payload.len() as u32).to_le_bytes());
-            response.extend_from_slice(&response_payload);
+                    // Send response with Response frame type
+                    let response_header = encode_stream_header(
+                        FrameType::Response,
+                        method_id,
+                        request_id,
+                        response_payload.len() as u32,
+                    );
 
-            writer.write_all(&response).await?;
+                    let mut response =
+                        Vec::with_capacity(STREAM_HEADER_SIZE + response_payload.len());
+                    response.extend_from_slice(&response_header);
+                    response.extend_from_slice(&response_payload);
+
+                    writer.lock().await.write_all(&response).await?;
+                }
+                FrameType::StreamItem | FrameType::StreamEnd | FrameType::StreamError => {
+                    // Client-side streaming frames - would need stream handler registration
+                    // For now, these are handled by streaming dispatch handlers
+                    eprintln!("Server received stream frame (not yet routed): {:?}", frame_type);
+                }
+                FrameType::Response => {
+                    // Server shouldn't receive Response frames
+                    eprintln!("Server received unexpected Response frame");
+                }
+            }
         }
 
+        Ok(())
+    }
+}
+
+/// Handle for sending stream responses from server to client.
+pub struct ServerStreamSender {
+    writer: Arc<Mutex<tokio::io::WriteHalf<TcpStream>>>,
+    method_id: u16,
+    request_id: u64,
+}
+
+impl ServerStreamSender {
+    /// Create a new server stream sender.
+    pub fn new(
+        writer: Arc<Mutex<tokio::io::WriteHalf<TcpStream>>>,
+        method_id: u16,
+        request_id: u64,
+    ) -> Self {
+        Self {
+            writer,
+            method_id,
+            request_id,
+        }
+    }
+
+    /// Send an item to the client stream.
+    pub async fn send<T: Serialize>(&self, item: &T) -> Result<()> {
+        let payload = postcard::to_allocvec(item)?;
+        let header = encode_stream_header(
+            FrameType::StreamItem,
+            self.method_id,
+            self.request_id,
+            payload.len() as u32,
+        );
+
+        let mut message = Vec::with_capacity(STREAM_HEADER_SIZE + payload.len());
+        message.extend_from_slice(&header);
+        message.extend_from_slice(&payload);
+
+        self.writer.lock().await.write_all(&message).await?;
+        Ok(())
+    }
+
+    /// Signal successful end of stream.
+    pub async fn end(&self) -> Result<()> {
+        let header =
+            encode_stream_header(FrameType::StreamEnd, self.method_id, self.request_id, 0);
+        self.writer.lock().await.write_all(&header).await?;
+        Ok(())
+    }
+
+    /// Send an error and end the stream.
+    pub async fn error(&self, err: impl std::fmt::Display) -> Result<()> {
+        let payload = postcard::to_allocvec(&err.to_string())?;
+        let header = encode_stream_header(
+            FrameType::StreamError,
+            self.method_id,
+            self.request_id,
+            payload.len() as u32,
+        );
+
+        let mut message = Vec::with_capacity(STREAM_HEADER_SIZE + payload.len());
+        message.extend_from_slice(&header);
+        message.extend_from_slice(&payload);
+
+        self.writer.lock().await.write_all(&message).await?;
         Ok(())
     }
 }

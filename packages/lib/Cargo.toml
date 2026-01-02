@@ -12,6 +12,7 @@ uuid = { workspace = true, features = ["v4"] }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 bytes = "1"
+futures-core = "0.3"
 
 [dev-dependencies]
 tokio-test = "0.4"

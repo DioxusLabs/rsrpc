@@ -282,6 +282,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "futures-core",
  "postcard",
  "rrpc-macro",
  "serde",

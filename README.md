@@ -47,6 +47,8 @@ With rsrpc, what you see is what you get. No extra types, traits, mods, etc. The
 
 **tonic/gRPC**: Requires protobuf schemas, overkill for pure Rust services where cross-language support isn't needed.
 
+**dioxus serverfn**: Requires `#[cfg(feature = "server")]`. Using trait-based RPC makes it possible to separate client/server code. Does not support raw TCP streams.
+
 **Raw TCP/WebSocket**: Too low-level. You end up building dispatch tables and request correlation yourself.
 
 ## Stream Support

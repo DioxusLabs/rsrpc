@@ -1,0 +1,8 @@
+[package]
+name = "rrpc-macro"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+syn = { version = "2.0", features = ["full"] }
+quote = "1.0"

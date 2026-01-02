@@ -1,0 +1,15 @@
+[package]
+name = "rrpc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true, features = ["derive"] }
+postcard = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

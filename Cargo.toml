@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "packages/lib",
+    "packages/macro"
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+postcard = "1"
+uuid = { version = "1.19.0", features = ["v4"] }
+anyhow = "1.0.100"
+async-trait = "0.1.89"
+
+[package]
+name = "rrpc-examples"
+version = "0.1.0"
+edition = "2021"
+publish = false
+

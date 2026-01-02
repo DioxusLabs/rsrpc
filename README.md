@@ -1,120 +1,114 @@
 # rsrpc
 
-Ergonomic Rust-to-Rust RPC where the trait is the API.
-
-## Overview
-
-rsrpc generates RPC client and server code from a trait definition. The client implements the same trait as the server, so `client.method(args)` just works. No separate client types, no message enums, no schema files.
+Ergonomic Rust-to-Rust RPC, perfect for web services and web development.
 
 ```rust
+// 1. Define your interface with a trait.
 #[rsrpc::service]
 pub trait Worker: Send + Sync + 'static {
     async fn run_task(&self, task: Task) -> Result<Output>;
     async fn status(&self) -> Result<WorkerStatus>;
 }
-```
 
-The macro generates:
-- `impl Worker for Client<dyn Worker>` — call methods directly on the client
-- `<dyn Worker>::serve(impl)` — wrap any implementation in a server
-
-## Usage
-
-Define your service trait:
-
-```rust
-use anyhow::Result;
-
-#[rsrpc::service]
-pub trait VmManager: Send + Sync + 'static {
-    async fn start_vm(&self, vm_id: String) -> Result<bool>;
-    async fn stop_vm(&self, vm_id: String) -> Result<bool>;
-    async fn get_status(&self, vm_id: String) -> Result<VmStatus>;
-}
-```
-
-Implement and run the server:
-
-```rust
-use rsrpc::async_trait;
-
-struct MyVmManager { /* ... */ }
-
+// 2. Implement the trait for your different backends
+pub struct MacosWorker;
 #[async_trait]
-impl VmManager for MyVmManager {
-    async fn start_vm(&self, vm_id: String) -> Result<bool> {
-        // implementation
+impl Worker for MacosWorker {
+    async fn run_task(&self, task: Task) -> Result<Output> {
+        // ...
     }
-    // ...
+    async fn status(&self) -> Result<Output> {
+        // ...
+    }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // use `::serve` on the trait impl to create a server
-    let server = <dyn VmManager>::serve(MyVmManager::new());
+// 3. Start your server
+<dyn Worker>::serve(MacosWorker).listen("0.0.0.0:9000").await
 
-    // And then you can bind a tcp listener and listen
-    server.listen("0.0.0.0:9000").await
-}
+// 4. Call RPC methods from the rsrpc `Client<T>`
+let client = Client::<dyn Worker>::connect("10.0.0.5:9000").await?;
+let result = client.status()?;
+let output = client.run_task(Task::foo())?;
 ```
 
-Connect from a client:
+## Stream Support
+
+The `Encoding` trait lets you define custom RPC types, useful for foreign object implemenations and streams.
+
+The `RpcStream` type wraps `impl Stream`, making it easy to implement status updates and progress indicators.
 
 ```rust
-use rsrpc::Client;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let client: Client<dyn VmManager> = Client::connect("10.0.0.5:9000").await?;
-
-    client.start_vm("vm-1".into()).await?;
-
-    let status = client.get_status("vm-1".into()).await?;
-
-    Ok(())
+#[rsrpc::service]
+pub trait LogService: Send + Sync + 'static {
+    // Use `RpcStream` to return or send a stream of LogEntry items over a single call (no polling!)
+    async fn stream_logs(&self, filter: LogFilter) -> Result<RpcStream<LogEntry>>;
 }
 ```
 
-## Polymorphism
+## HTTP Client Support
 
-Because `Client<dyn VmManager>` implements `VmManager`, generic code works with both local and remote implementations:
+Use `RpcStream` over REST with the optional `#[get]`/`#[post]` endpoint add-on. Perfect for web development!
+
+Todo: OpenAPI support and header extraction.
 
 ```rust
-async fn check_all_vms(manager: &impl VmManager) -> Result<()> {
-    for vm in manager.list_vms().await? {
-        let status = manager.get_status(vm).await?;
-        println!("{}: {:?}", vm, status);
-    }
-    Ok(())
+/// A user management service with both RPC and HTTP endpoints.
+#[rsrpc::service]
+pub trait UserService: Send + Sync + 'static {
+    /// Health check - available via HTTP GET /health
+    #[get("/health")]
+    async fn health(&self) -> Result<String>;
+
+    /// Get user by ID - available via HTTP GET /users/:id
+    #[get("/users/{id}")]
+    async fn get_user(&self, id: String) -> Result<User>;
+
+    /// List all users with optional limit - HTTP GET /users?limit=N
+    #[get("/users/?limit")]
+    async fn list_users(&self, limit: u32) -> Result<Vec<User>>;
+
+    /// Create a new user - HTTP POST /users with JSON body
+    #[post("/users")]
+    async fn create_user(&self, req: CreateUserRequest) -> Result<User>;
+
+    /// Delete a user - HTTP DELETE /users/:id
+    #[delete("/users/{id}")]
+    async fn delete_user(&self, id: String) -> Result<bool>;
 }
-
-// Works with local implementation
-check_all_vms(&my_local_manager).await?;
-
-// Works with remote client
-check_all_vms(&client).await?;
 ```
 
-## Wire Protocol
+## Multiple Backend Implementations
 
-Messages use a simple binary format:
+The `Client<T>` type implements *your* trait, making it easy to mock different backends and unify protocols across heterogeneous fleets.
 
-| Field | Size | Description |
-|-------|------|-------------|
-| method_id | 2 bytes | Method identifier (u16 LE) |
-| request_id | 8 bytes | Request correlation ID (u64 LE) |
-| payload_len | 4 bytes | Payload length (u32 LE) |
-| payload | variable | Serialized request/response |
+```rust
+struct MacosServerImpl;
+impl Worker for MacosImpl {
+    // ..
+}
 
-Payloads are serialized with [postcard](https://docs.rs/postcard). Method return types are wrapped as `Result<T, String>` on the wire, allowing any error type on the server side.
+struct WindowsServerImpl;
+impl Worker for WindowsServerImpl {
+    // ..
+}
+```
 
-## Requirements
+## Easy Mocking
 
-- All method arguments and return types must implement `Serialize` and `Deserialize`
-- Traits must have `Send + Sync + 'static` bounds
-- Methods must be `async fn(&self, ...)`
+No remote? No problem. Spawn workers locally or mock them.
+
+```rust
+struct LocalWorker;
+impl Worker for LocalWorker {
+    // ..
+}
+```
 
 ## Why not X?
+
+This crate was designed to be a better *pure Rust* RPC. Eventually, we plan to add cross-language binding and code-generation support. Other RPC solutions are popular, but their code generation is not very discoverable or ergonomic.
+
+With rsrpc, what you see is what you get. No extra types, traits, mods, etc. The only magic is that your trait is automatically implemented for the rspsc `Client<T>` type.
 
 **tarpc**: Client codegen isn't discoverable from the trait, requires a mandatory `Context` parameter, trait definition doesn't match the client interface.
 

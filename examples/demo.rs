@@ -65,34 +65,6 @@ impl VmManager for MacosVmManager {
 }
 
 // =============================================================================
-// CLIENT USAGE - CALL METHODS DIRECTLY ON THE CLIENT
-// =============================================================================
-
-async fn run_client() -> Result<()> {
-    println!("Connecting to server...");
-
-    // Client<dyn VmManager> implements VmManager!
-    let client: Client<dyn VmManager> = Client::connect("127.0.0.1:8080").await?;
-
-    // Call methods directly - just like a local implementation
-    println!("Starting VM...");
-    client.start_vm("vm-123".into()).await?;
-
-    println!("Getting VM status...");
-    let status = client.get_vm_status("vm-123".into()).await?;
-    println!("VM status: {:?}", status);
-
-    println!("Listing VMs...");
-    let vms = client.list_vms().await?;
-    println!("All VMs: {:?}", vms);
-
-    println!("Stopping VM...");
-    client.stop_vm("vm-123".into()).await?;
-
-    Ok(())
-}
-
-// =============================================================================
 // POLYMORPHISM - WORKS WITH BOTH LOCAL AND REMOTE IMPLS
 // =============================================================================
 
@@ -115,6 +87,8 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("server");
 
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
+
     match mode {
         "server" => {
             let manager = MacosVmManager {};
@@ -124,12 +98,31 @@ async fn main() -> Result<()> {
             do_vm_work(&manager).await?;
 
             // Create and run server
-            println!("\nStarting server on 127.0.0.1:8080...");
+            println!("\nStarting server on 127.0.0.1:{port}...");
             let server = serve_vm_manager(manager);
-            server.listen("127.0.0.1:8080").await?;
+            server.listen(&format!("127.0.0.1:{port}")).await?;
         }
         "client" => {
-            run_client().await?;
+            println!("Connecting to server...");
+
+            // Client<dyn VmManager> implements VmManager!
+            let client: Client<dyn VmManager> =
+                Client::connect(&format!("127.0.0.1:{port}")).await?;
+
+            // Call methods directly - just like a local implementation
+            println!("Starting VM...");
+            client.start_vm("vm-123".into()).await?;
+
+            println!("Getting VM status...");
+            let status = client.get_vm_status("vm-123".into()).await?;
+            println!("VM status: {:?}", status);
+
+            println!("Listing VMs...");
+            let vms = client.list_vms().await?;
+            println!("All VMs: {:?}", vms);
+
+            println!("Stopping VM...");
+            client.stop_vm("vm-123".into()).await?;
         }
         _ => {
             println!("Usage: cargo run --example demo -- [server|client]");

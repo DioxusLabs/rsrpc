@@ -11,6 +11,7 @@ postcard = { workspace = true, features = ["alloc"] }
 uuid = { workspace = true, features = ["v4"] }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+bytes = "1"
 
 [dev-dependencies]
 tokio-test = "0.4"

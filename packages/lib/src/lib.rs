@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use bytes::Bytes;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -67,7 +68,7 @@ pub struct Client<T: ?Sized> {
 
 struct ClientInner {
     writer: Mutex<tokio::io::WriteHalf<TcpStream>>,
-    pending: Mutex<HashMap<u64, oneshot::Sender<Vec<u8>>>>,
+    pending: Mutex<HashMap<u64, oneshot::Sender<Bytes>>>,
     next_request_id: AtomicU64,
 }
 
@@ -128,10 +129,10 @@ impl<T: ?Sized + 'static> Client<T> {
             let mut payload = vec![0u8; payload_len as usize];
             reader.read_exact(&mut payload).await?;
 
-            // Dispatch to waiting caller
+            // Dispatch to waiting caller - convert to Bytes for cheap cloning
             let sender = inner.pending.lock().await.remove(&request_id);
             if let Some(tx) = sender {
-                let _ = tx.send(payload);
+                let _ = tx.send(Bytes::from(payload));
             }
         }
         Ok(())

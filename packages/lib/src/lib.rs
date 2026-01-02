@@ -1,26 +1,49 @@
-//! rsrpc - Ergonomic Rust-to-Rust RPC
+//! # rsrpc - Ergonomic Rust-to-Rust RPC
 //!
 //! A function-forward RPC library where the trait IS the API.
 //!
-//! # Example
+//! ## Overview
+//!
+//! rsrpc generates RPC client and server code from a trait definition. The client
+//! implements the same trait as the server, so `client.method(args)` just works.
+//! No separate client types, no message enums, no schema files.
+//!
+//! ## Quick Start
 //!
 //! ```ignore
+//! use anyhow::Result;
+//! use rsrpc::{async_trait, Client};
+//!
 //! #[rsrpc::service]
-//! pub trait Worker: Send + Sync + 'static {
-//!     async fn run_task(&self, task: Task) -> Result<Output, Error>;
-//!     async fn status(&self) -> WorkerStatus;
+//! pub trait Calculator: Send + Sync + 'static {
+//!     async fn add(&self, a: i32, b: i32) -> Result<i32>;
 //! }
 //!
-//! // Server
-//! let server = <dyn Worker>::serve(my_worker);
-//! server.listen("0.0.0.0:9000").await?;
+//! // Server implementation
+//! struct MyCalculator;
 //!
-//! // Client
-//! let client: Client<dyn Worker> = Client::connect("10.0.0.5:9000").await?;
-//! client.run_task(task).await?;
+//! #[async_trait]
+//! impl Calculator for MyCalculator {
+//!     async fn add(&self, a: i32, b: i32) -> Result<i32> {
+//!         Ok(a + b)
+//!     }
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<()> {
+//!     // Server
+//!     let server = <dyn Calculator>::serve(MyCalculator);
+//!     tokio::spawn(server.listen("0.0.0.0:9000"));
+//!
+//!     // Client
+//!     let client: Client<dyn Calculator> = Client::connect("127.0.0.1:9000").await?;
+//!     let result = client.add(2, 3).await?;
+//!     assert_eq!(result, 5);
+//!     Ok(())
+//! }
 //! ```
 //!
-//! # Streaming
+//! ## Streaming
 //!
 //! Methods returning `Result<RpcStream<T>>` automatically stream data:
 //!
@@ -29,7 +52,40 @@
 //! pub trait LogService: Send + Sync + 'static {
 //!     async fn stream_logs(&self, filter: Filter) -> Result<RpcStream<LogEntry>>;
 //! }
+//!
+//! // Client usage
+//! let mut stream = client.stream_logs(filter).await?;
+//! while let Some(entry) = stream.next().await {
+//!     println!("{:?}", entry?);
+//! }
 //! ```
+//!
+//! ## HTTP/REST Support
+//!
+//! Enable the `http` feature for REST endpoint support:
+//!
+//! ```ignore
+//! #[rsrpc::service]
+//! pub trait UserService: Send + Sync + 'static {
+//!     #[get("/users/{id}")]
+//!     async fn get_user(&self, id: String) -> Result<User>;
+//!
+//!     #[post("/users")]
+//!     async fn create_user(&self, user: CreateUserRequest) -> Result<User>;
+//! }
+//!
+//! // Serve via HTTP
+//! let router = <dyn UserService>::http_routes(service);
+//! axum::serve(listener, router).await?;
+//!
+//! // Or use HTTP client
+//! let client: HttpClient<dyn UserService> = HttpClient::new("http://localhost:8080");
+//! client.get_user("123".into()).await?;
+//! ```
+//!
+//! ## Features
+//!
+//! - `http` - Enable HTTP/REST support with axum and reqwest
 
 mod stream;
 pub use stream::*;

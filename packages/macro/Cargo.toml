@@ -1,7 +1,15 @@
 [package]
 name = "rsrpc-macro"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Procedural macros for rsrpc - Ergonomic Rust-to-Rust RPC"
+documentation = "https://docs.rs/rsrpc-macro"
+readme = "README.md"
+keywords = ["rpc", "async", "macro", "proc-macro"]
+categories = ["network-programming", "development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true

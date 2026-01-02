@@ -1,20 +1,28 @@
 [package]
 name = "rsrpc"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Ergonomic Rust-to-Rust RPC where the trait is the API"
+documentation = "https://docs.rs/rsrpc"
+readme = "README.md"
+keywords = ["rpc", "async", "networking", "microservices"]
+categories = ["network-programming", "asynchronous"]
 
 [features]
 default = []
 http = ["dep:http", "dep:axum", "dep:reqwest", "dep:serde_json"]
 
 [dependencies]
-rsrpc-macro = { path = "../macro" }
+rsrpc-macro.workspace = true
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 postcard = { workspace = true, features = ["alloc"] }
 uuid = { workspace = true, features = ["v4"] }
-anyhow = { workspace = true }
-async-trait = { workspace = true }
+anyhow.workspace = true
+async-trait.workspace = true
 bytes = "1"
 futures-core = "0.3"
 

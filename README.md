@@ -24,13 +24,6 @@ Define your service trait:
 
 ```rust
 use anyhow::Result;
-use serde::{Serialize, Deserialize};
-
-#[derive(Serialize, Deserialize)]
-pub struct VmStatus {
-    pub running: bool,
-    pub memory_mb: u64,
-}
 
 #[rrpc::service]
 pub trait VmManager: Send + Sync + 'static {
@@ -57,7 +50,10 @@ impl VmManager for MyVmManager {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // use `::serve` on the trait impl to create a server
     let server = <dyn VmManager>::serve(MyVmManager::new());
+
+    // And then you can bind a tcp listener and listen
     server.listen("0.0.0.0:9000").await
 }
 ```
@@ -72,6 +68,7 @@ async fn main() -> Result<()> {
     let client: Client<dyn VmManager> = Client::connect("10.0.0.5:9000").await?;
 
     client.start_vm("vm-1".into()).await?;
+
     let status = client.get_status("vm-1".into()).await?;
 
     Ok(())

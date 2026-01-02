@@ -1,13 +1,13 @@
-# rrpc
+# rsrpc
 
 Ergonomic Rust-to-Rust RPC where the trait is the API.
 
 ## Overview
 
-rrpc generates RPC client and server code from a trait definition. The client implements the same trait as the server, so `client.method(args)` just works. No separate client types, no message enums, no schema files.
+rsrpc generates RPC client and server code from a trait definition. The client implements the same trait as the server, so `client.method(args)` just works. No separate client types, no message enums, no schema files.
 
 ```rust
-#[rrpc::service]
+#[rsrpc::service]
 pub trait Worker: Send + Sync + 'static {
     async fn run_task(&self, task: Task) -> Result<Output>;
     async fn status(&self) -> Result<WorkerStatus>;
@@ -25,7 +25,7 @@ Define your service trait:
 ```rust
 use anyhow::Result;
 
-#[rrpc::service]
+#[rsrpc::service]
 pub trait VmManager: Send + Sync + 'static {
     async fn start_vm(&self, vm_id: String) -> Result<bool>;
     async fn stop_vm(&self, vm_id: String) -> Result<bool>;
@@ -36,7 +36,7 @@ pub trait VmManager: Send + Sync + 'static {
 Implement and run the server:
 
 ```rust
-use rrpc::async_trait;
+use rsrpc::async_trait;
 
 struct MyVmManager { /* ... */ }
 
@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
 Connect from a client:
 
 ```rust
-use rrpc::Client;
+use rsrpc::Client;
 
 #[tokio::main]
 async fn main() -> Result<()> {

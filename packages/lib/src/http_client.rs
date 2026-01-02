@@ -1,4 +1,4 @@
-//! HTTP client and server support for rrpc services.
+//! HTTP client and server support for rsrpc services.
 //!
 //! This module provides HTTP/REST bindings for services that have methods
 //! annotated with `#[get]`, `#[post]`, etc.

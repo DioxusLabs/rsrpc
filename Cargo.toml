@@ -13,17 +13,17 @@ anyhow = "1.0.100"
 async-trait = "0.1.89"
 
 [package]
-name = "rrpc-examples"
+name = "rsrpc-examples"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [features]
 default = []
-http = ["rrpc/http", "dep:axum"]
+http = ["rsrpc/http", "dep:axum"]
 
 [dependencies]
-rrpc = { path = "packages/lib" }
+rsrpc = { path = "packages/lib" }
 tokio = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }

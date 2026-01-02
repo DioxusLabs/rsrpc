@@ -1,7 +1,7 @@
-//! Example usage of rrpc
+//! Example usage of rsrpc
 //!
 //! This demonstrates the ergonomic API where:
-//! - Users define a trait with `#[rrpc::service]`
+//! - Users define a trait with `#[rsrpc::service]`
 //! - `Client<dyn Trait>` automatically implements `Trait`
 //! - Server is created with `serve_<trait_name>(impl)`
 //!
@@ -9,14 +9,14 @@
 //! Run the client: cargo run --example demo -- client
 
 use anyhow::Result;
-use rrpc::{async_trait, Client};
+use rsrpc::{async_trait, Client};
 use serde::{Deserialize, Serialize};
 
 // =============================================================================
 // DEFINE THE SERVICE TRAIT - THIS IS YOUR API
 // =============================================================================
 
-#[rrpc::service]
+#[rsrpc::service]
 pub trait VmManager: Send + Sync + 'static {
     async fn start_vm(&self, vm_id: String) -> Result<bool>;
     async fn stop_vm(&self, vm_id: String) -> Result<bool>;

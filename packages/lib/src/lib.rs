@@ -1,11 +1,11 @@
-//! rrpc - Ergonomic Rust-to-Rust RPC
+//! rsrpc - Ergonomic Rust-to-Rust RPC
 //!
 //! A function-forward RPC library where the trait IS the API.
 //!
 //! # Example
 //!
 //! ```ignore
-//! #[rrpc::service]
+//! #[rsrpc::service]
 //! pub trait Worker: Send + Sync + 'static {
 //!     async fn run_task(&self, task: Task) -> Result<Output, Error>;
 //!     async fn status(&self) -> WorkerStatus;
@@ -25,7 +25,7 @@
 //! Methods returning `Result<RpcStream<T>>` automatically stream data:
 //!
 //! ```ignore
-//! #[rrpc::service]
+//! #[rsrpc::service]
 //! pub trait LogService: Send + Sync + 'static {
 //!     async fn stream_logs(&self, filter: Filter) -> Result<RpcStream<LogEntry>>;
 //! }
@@ -54,7 +54,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// Re-export the service macro
-pub use rrpc_macro::service;
+pub use rsrpc_macro::service;
 
 /// Re-exports for generated code
 pub use async_trait::async_trait;

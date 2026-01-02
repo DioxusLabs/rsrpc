@@ -1,5 +1,5 @@
 [package]
-name = "rrpc"
+name = "rsrpc"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,7 +8,7 @@ default = []
 http = ["dep:http", "dep:axum", "dep:reqwest", "dep:serde_json"]
 
 [dependencies]
-rrpc-macro = { path = "../macro" }
+rsrpc-macro = { path = "../macro" }
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 postcard = { workspace = true, features = ["alloc"] }

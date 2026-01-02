@@ -1,4 +1,4 @@
-//! HTTP REST example for rrpc
+//! HTTP REST example for rsrpc
 //!
 //! Demonstrates using HTTP REST annotations alongside RPC.
 //! Methods annotated with #[get], #[post], etc. are accessible via HTTP.
@@ -8,7 +8,7 @@
 //! Run the RPC client: cargo run --example http_demo --features http -- rpc-client
 
 use anyhow::Result;
-use rrpc::{async_trait, Client, HttpClient};
+use rsrpc::{async_trait, Client, HttpClient};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -30,7 +30,7 @@ pub struct CreateUserRequest {
 }
 
 /// A user management service with both RPC and HTTP endpoints.
-#[rrpc::service]
+#[rsrpc::service]
 pub trait UserService: Send + Sync + 'static {
     /// Health check - available via HTTP GET /health
     #[get("/health")]

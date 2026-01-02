@@ -24,7 +24,7 @@ Build an ergonomic, function-forward RPC library for Rust-to-Rust communication.
 Working implementation with:
 - `Server<T>` - wraps service impl, handles TCP connections
 - `Client<T>` - connects to remote, implements the service trait
-- `#[rrpc::service]` - proc macro that generates client/server glue
+- `#[rsrpc::service]` - proc macro that generates client/server glue
 - Wire format: `[method_id: u16][request_id: u64][payload_len: u32][payload]`
 - Uses `postcard` for serialization
 
@@ -37,7 +37,7 @@ Working implementation with:
 
 ## Next Steps
 
-1. ~~**Write the proc macro**~~ - Done: `#[rrpc::service]` generates glue code from trait definition
+1. ~~**Write the proc macro**~~ - Done: `#[rsrpc::service]` generates glue code from trait definition
 2. ~~**Error handling**~~ - Done: errors converted to strings for wire transport
 3. **Connection management** - Reconnection, health checks, timeouts
 4. **Streaming support** - Methods returning `impl Stream<Item = T>`

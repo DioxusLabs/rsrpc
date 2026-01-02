@@ -1,4 +1,4 @@
-//! Streaming support for rrpc.
+//! Streaming support for rsrpc.
 //!
 //! This module provides bidirectional streaming over RPC connections.
 
@@ -101,10 +101,7 @@ impl<T> RpcStream<T> {
     }
 
     /// Create a bidirectional stream with both send and receive capabilities.
-    pub fn bidirectional(
-        rx: mpsc::Receiver<Result<T, String>>,
-        tx: mpsc::Sender<Bytes>,
-    ) -> Self {
+    pub fn bidirectional(rx: mpsc::Receiver<Result<T, String>>, tx: mpsc::Sender<Bytes>) -> Self {
         Self {
             rx,
             tx: Some(StreamSender {
@@ -197,7 +194,9 @@ pub fn encode_stream_header(
 }
 
 /// Decode a streaming frame header.
-pub fn decode_stream_header(header: &[u8; STREAM_HEADER_SIZE]) -> Option<(FrameType, u16, u64, u32)> {
+pub fn decode_stream_header(
+    header: &[u8; STREAM_HEADER_SIZE],
+) -> Option<(FrameType, u16, u64, u32)> {
     let frame_type = FrameType::from_u8(header[0])?;
     let method_id = u16::from_le_bytes([header[1], header[2]]);
     let request_id = u64::from_le_bytes([

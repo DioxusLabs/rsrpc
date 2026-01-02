@@ -1,4 +1,4 @@
-//! Streaming example for rrpc
+//! Streaming example for rsrpc
 //!
 //! Demonstrates server-side streaming where the server sends multiple
 //! log entries to the client over time.
@@ -7,7 +7,7 @@
 //! Run the client: cargo run --example streaming -- client
 
 use anyhow::Result;
-use rrpc::{async_trait, Client, RpcStream, StreamBuilder};
+use rsrpc::{async_trait, Client, RpcStream, StreamBuilder};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -34,7 +34,7 @@ pub struct LogFilter {
 ///
 /// Methods returning `Result<RpcStream<T>>` are automatically handled
 /// as streaming calls by the macro.
-#[rrpc::service]
+#[rsrpc::service]
 pub trait LogService: Send + Sync + 'static {
     /// Get server info (unary call).
     async fn get_info(&self) -> Result<String>;

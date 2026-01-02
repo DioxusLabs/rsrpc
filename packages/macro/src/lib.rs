@@ -2,8 +2,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, Attribute, FnArg, Ident, ItemTrait, Pat, ReturnType, TraitItem,
-    TraitItemFn, Type,
+    parse_macro_input, Attribute, FnArg, Ident, ItemTrait, Pat, ReturnType, TraitItem, TraitItemFn,
+    Type,
 };
 
 // =============================================================================
@@ -34,21 +34,21 @@ impl HttpMethod {
 
     fn to_tokens(&self) -> TokenStream2 {
         match self {
-            Self::Get => quote!(::rrpc::http::Method::GET),
-            Self::Post => quote!(::rrpc::http::Method::POST),
-            Self::Put => quote!(::rrpc::http::Method::PUT),
-            Self::Patch => quote!(::rrpc::http::Method::PATCH),
-            Self::Delete => quote!(::rrpc::http::Method::DELETE),
+            Self::Get => quote!(::rsrpc::http::Method::GET),
+            Self::Post => quote!(::rsrpc::http::Method::POST),
+            Self::Put => quote!(::rsrpc::http::Method::PUT),
+            Self::Patch => quote!(::rsrpc::http::Method::PATCH),
+            Self::Delete => quote!(::rsrpc::http::Method::DELETE),
         }
     }
 
     fn to_axum_method(&self) -> TokenStream2 {
         match self {
-            Self::Get => quote!(::rrpc::axum::routing::get),
-            Self::Post => quote!(::rrpc::axum::routing::post),
-            Self::Put => quote!(::rrpc::axum::routing::put),
-            Self::Patch => quote!(::rrpc::axum::routing::patch),
-            Self::Delete => quote!(::rrpc::axum::routing::delete),
+            Self::Get => quote!(::rsrpc::axum::routing::get),
+            Self::Post => quote!(::rsrpc::axum::routing::post),
+            Self::Put => quote!(::rsrpc::axum::routing::put),
+            Self::Patch => quote!(::rsrpc::axum::routing::patch),
+            Self::Delete => quote!(::rsrpc::axum::routing::delete),
         }
     }
 }
@@ -57,10 +57,10 @@ impl HttpMethod {
 #[derive(Debug, Clone)]
 struct HttpRoute {
     method: HttpMethod,
-    path: String,                // Original path for URL building
-    axum_path: String,           // Axum-compatible path (uses :param instead of {param})
-    path_params: Vec<String>,    // Parameters extracted from {param} in path
-    query_params: Vec<String>,   // Parameters extracted from ?param
+    path: String,              // Original path for URL building
+    axum_path: String,         // Axum-compatible path (uses :param instead of {param})
+    path_params: Vec<String>,  // Parameters extracted from {param} in path
+    query_params: Vec<String>, // Parameters extracted from ?param
 }
 
 /// Parse route string like "/logs/{id}/?limit" into components
@@ -144,7 +144,7 @@ fn parse_http_attrs(attrs: &[Attribute]) -> syn::Result<Option<HttpRoute>> {
 /// # Example
 ///
 /// ```ignore
-/// #[rrpc::service]
+/// #[rsrpc::service]
 /// pub trait Worker: Send + Sync + 'static {
 ///     async fn run_task(&self, task: Task) -> Result<Output, Error>;
 ///     async fn status(&self) -> WorkerStatus;
@@ -160,7 +160,7 @@ fn parse_http_attrs(attrs: &[Attribute]) -> syn::Result<Option<HttpRoute>> {
 /// server-side streaming - no special annotation needed:
 ///
 /// ```ignore
-/// #[rrpc::service]
+/// #[rsrpc::service]
 /// pub trait LogService: Send + Sync + 'static {
 ///     async fn stream_logs(&self, filter: Filter) -> Result<RpcStream<LogEntry>>;
 /// }
@@ -168,11 +168,11 @@ fn parse_http_attrs(attrs: &[Attribute]) -> syn::Result<Option<HttpRoute>> {
 ///
 /// # Local (non-Send) services
 ///
-/// Use `#[rrpc::service(?Send)]` to allow non-Send futures. This is useful
+/// Use `#[rsrpc::service(?Send)]` to allow non-Send futures. This is useful
 /// when your async methods hold non-Send types across await points:
 ///
 /// ```ignore
-/// #[rrpc::service(?Send)]
+/// #[rsrpc::service(?Send)]
 /// pub trait LocalWorker: 'static {
 ///     async fn run_task(&self, task: Task) -> Result<Output, Error>;
 /// }
@@ -209,10 +209,8 @@ fn generate_service(trait_def: &ItemTrait, not_send: bool) -> syn::Result<TokenS
         .collect::<syn::Result<Vec<_>>>()?;
 
     // Generate request structs for each method
-    let request_structs: Vec<TokenStream2> = methods
-        .iter()
-        .map(|m| generate_request_struct(m))
-        .collect();
+    let request_structs: Vec<TokenStream2> =
+        methods.iter().map(|m| generate_request_struct(m)).collect();
 
     // Generate method ID constants
     let method_ids: Vec<TokenStream2> = methods
@@ -248,9 +246,9 @@ fn generate_service(trait_def: &ItemTrait, not_send: bool) -> syn::Result<TokenS
 
     // Choose async_trait attribute based on Send requirement
     let async_trait_attr = if not_send {
-        quote! { #[::rrpc::async_trait(?Send)] }
+        quote! { #[::rsrpc::async_trait(?Send)] }
     } else {
-        quote! { #[::rrpc::async_trait] }
+        quote! { #[::rsrpc::async_trait] }
     };
 
     // Dispatch function return type depends on Send requirement
@@ -260,11 +258,11 @@ fn generate_service(trait_def: &ItemTrait, not_send: bool) -> syn::Result<TokenS
                 service: &'a T,
                 method_id: u16,
                 payload: &'a [u8],
-            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::rrpc::DispatchResult> + 'a>> {
+            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::rsrpc::DispatchResult> + 'a>> {
                 Box::pin(async move {
                     match method_id {
                         #(#dispatch_arms)*
-                        _ => ::rrpc::DispatchResult::Error(format!("Unknown method ID: {}", method_id)),
+                        _ => ::rsrpc::DispatchResult::Error(format!("Unknown method ID: {}", method_id)),
                     }
                 })
             }
@@ -275,11 +273,11 @@ fn generate_service(trait_def: &ItemTrait, not_send: bool) -> syn::Result<TokenS
                 service: &'a T,
                 method_id: u16,
                 payload: &'a [u8],
-            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::rrpc::DispatchResult> + Send + 'a>> {
+            ) -> ::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ::rsrpc::DispatchResult> + Send + 'a>> {
                 Box::pin(async move {
                     match method_id {
                         #(#dispatch_arms)*
-                        _ => ::rrpc::DispatchResult::Error(format!("Unknown method ID: {}", method_id)),
+                        _ => ::rsrpc::DispatchResult::Error(format!("Unknown method ID: {}", method_id)),
                     }
                 })
             }
@@ -329,7 +327,7 @@ fn generate_service(trait_def: &ItemTrait, not_send: bool) -> syn::Result<TokenS
         quote! {
             #[cfg(feature = "http")]
             #async_trait_attr
-            impl #trait_name for ::rrpc::HttpClient<dyn #trait_name> {
+            impl #trait_name for ::rsrpc::HttpClient<dyn #trait_name> {
                 #(#http_client_methods)*
             }
         }
@@ -368,7 +366,7 @@ fn generate_service(trait_def: &ItemTrait, not_send: bool) -> syn::Result<TokenS
         #[doc(hidden)]
         mod #mod_name {
             use super::*;
-            use ::rrpc::serde::{Serialize, Deserialize};
+            use ::rsrpc::serde::{Serialize, Deserialize};
 
             #(#request_structs)*
             #(#method_ids)*
@@ -378,7 +376,7 @@ fn generate_service(trait_def: &ItemTrait, not_send: bool) -> syn::Result<TokenS
         }
 
         #async_trait_attr
-        impl #trait_name for ::rrpc::Client<dyn #trait_name> {
+        impl #trait_name for ::rsrpc::Client<dyn #trait_name> {
             #(#client_impl_methods)*
         }
 
@@ -387,9 +385,9 @@ fn generate_service(trait_def: &ItemTrait, not_send: bool) -> syn::Result<TokenS
         /// Extension trait for creating servers from service implementations.
         impl dyn #trait_name {
             /// Create a server that hosts this service.
-            #trait_vis fn serve<T: #trait_name + 'static>(service: T) -> ::rrpc::Server<dyn #trait_name> {
+            #trait_vis fn serve<T: #trait_name + 'static>(service: T) -> ::rsrpc::Server<dyn #trait_name> {
                 let service: ::std::sync::Arc<dyn #trait_name> = ::std::sync::Arc::new(service);
-                ::rrpc::Server::from_arc(service, #mod_name::dispatch)
+                ::rsrpc::Server::from_arc(service, #mod_name::dispatch)
             }
         }
 
@@ -401,7 +399,7 @@ struct MethodInfo {
     name: Ident,
     args: Vec<(Ident, Type)>, // (name, type) excluding self
     return_type: Type,
-    http: Option<HttpRoute>,  // HTTP route info if method has #[get], #[post], etc.
+    http: Option<HttpRoute>, // HTTP route info if method has #[get], #[post], etc.
 }
 
 fn parse_method(method: &TraitItemFn) -> syn::Result<MethodInfo> {
@@ -481,7 +479,7 @@ fn generate_client_method(method: &MethodInfo, method_id: u16, trait_name: &Iden
     if arg_names.is_empty() {
         quote! {
             async fn #name(&self) -> #return_type {
-                <#return_type as ::rrpc::ClientEncoding<dyn #trait_name>>::invoke(
+                <#return_type as ::rsrpc::ClientEncoding<dyn #trait_name>>::invoke(
                     self,
                     #method_id,
                     &(),
@@ -497,9 +495,9 @@ fn generate_client_method(method: &MethodInfo, method_id: u16, trait_name: &Iden
 
         quote! {
             async fn #name(&self, #(#arg_decls),*) -> #return_type {
-                #[derive(::rrpc::serde::Serialize)]
+                #[derive(::rsrpc::serde::Serialize)]
                 struct __Request { #(#request_fields),* }
-                <#return_type as ::rrpc::ClientEncoding<dyn #trait_name>>::invoke(
+                <#return_type as ::rsrpc::ClientEncoding<dyn #trait_name>>::invoke(
                     self,
                     #method_id,
                     &__Request { #(#arg_names),* },
@@ -520,18 +518,18 @@ fn generate_dispatch_arm(method: &MethodInfo, method_id: u16) -> TokenStream2 {
         quote! {
             #method_id => {
                 let result = service.#name().await;
-                ::rrpc::ServerEncoding::into_dispatch(result)
+                ::rsrpc::ServerEncoding::into_dispatch(result)
             }
         }
     } else {
         quote! {
             #method_id => {
-                let req: #request_struct = match ::rrpc::postcard::from_bytes(payload) {
+                let req: #request_struct = match ::rsrpc::postcard::from_bytes(payload) {
                     Ok(r) => r,
-                    Err(e) => return ::rrpc::DispatchResult::Error(e.to_string()),
+                    Err(e) => return ::rsrpc::DispatchResult::Error(e.to_string()),
                 };
                 let result = service.#name(#(req.#arg_names),*).await;
-                ::rrpc::ServerEncoding::into_dispatch(result)
+                ::rsrpc::ServerEncoding::into_dispatch(result)
             }
         }
     }
@@ -651,14 +649,12 @@ fn generate_http_client_method(method: &MethodInfo, _trait_name: &Ident) -> Opti
         quote! { Some(&#body_name) }
     } else {
         // Multiple body params - wrap in anonymous struct
-        let body_fields: Vec<TokenStream2> = body_params
-            .iter()
-            .map(|(n, t)| quote! { #n: #t })
-            .collect();
+        let body_fields: Vec<TokenStream2> =
+            body_params.iter().map(|(n, t)| quote! { #n: #t }).collect();
         let body_values: Vec<&Ident> = body_params.iter().map(|(n, _)| *n).collect();
         quote! {
             {
-                #[derive(::rrpc::serde::Serialize)]
+                #[derive(::rsrpc::serde::Serialize)]
                 struct __Body { #(#body_fields),* }
                 Some(&__Body { #(#body_values),* })
             }
@@ -691,7 +687,7 @@ fn generate_query_struct(method: &MethodInfo) -> Option<TokenStream2> {
         .collect();
 
     Some(quote! {
-        #[derive(::rrpc::serde::Deserialize)]
+        #[derive(::rsrpc::serde::Deserialize)]
         struct #struct_name {
             #(#fields),*
         }
@@ -746,7 +742,7 @@ fn generate_http_handler(method: &MethodInfo, trait_name: &Ident) -> Option<Toke
 
     // State extractor (always first)
     extractors.push(quote! {
-        ::rrpc::axum::extract::State(service): ::rrpc::axum::extract::State<::std::sync::Arc<T>>
+        ::rsrpc::axum::extract::State(service): ::rsrpc::axum::extract::State<::std::sync::Arc<T>>
     });
 
     // Path extractor
@@ -755,14 +751,14 @@ fn generate_http_handler(method: &MethodInfo, trait_name: &Ident) -> Option<Toke
             let ty = path_param_types[0];
             let name = path_param_names[0];
             extractors.push(quote! {
-                ::rrpc::axum::extract::Path(#name): ::rrpc::axum::extract::Path<#ty>
+                ::rsrpc::axum::extract::Path(#name): ::rsrpc::axum::extract::Path<#ty>
             });
             call_args.push(quote! { #name });
         } else {
             let names = &path_param_names;
             let types = &path_param_types;
             extractors.push(quote! {
-                ::rrpc::axum::extract::Path((#(#names),*)): ::rrpc::axum::extract::Path<(#(#types),*)>
+                ::rsrpc::axum::extract::Path((#(#names),*)): ::rsrpc::axum::extract::Path<(#(#types),*)>
             });
             for name in &path_param_names {
                 call_args.push(quote! { #name });
@@ -773,7 +769,7 @@ fn generate_http_handler(method: &MethodInfo, trait_name: &Ident) -> Option<Toke
     // Query extractor
     if has_query {
         extractors.push(quote! {
-            ::rrpc::axum::extract::Query(query): ::rrpc::axum::extract::Query<#query_struct_name>
+            ::rsrpc::axum::extract::Query(query): ::rsrpc::axum::extract::Query<#query_struct_name>
         });
         for name in &query_param_names {
             call_args.push(quote! { query.#name });
@@ -785,16 +781,17 @@ fn generate_http_handler(method: &MethodInfo, trait_name: &Ident) -> Option<Toke
         if body_params.len() == 1 {
             let (name, ty) = body_params[0];
             extractors.push(quote! {
-                ::rrpc::axum::extract::Json(#name): ::rrpc::axum::extract::Json<#ty>
+                ::rsrpc::axum::extract::Json(#name): ::rsrpc::axum::extract::Json<#ty>
             });
             call_args.push(quote! { #name });
         } else {
-            let body_struct_name = format_ident!("__{}Body", to_pascal_case(&method.name.to_string()));
+            let body_struct_name =
+                format_ident!("__{}Body", to_pascal_case(&method.name.to_string()));
             let body_names: Vec<&Ident> = body_params.iter().map(|(n, _)| *n).collect();
 
             // The struct definition is generated in generate_http_routes
             extractors.push(quote! {
-                ::rrpc::axum::extract::Json(body): ::rrpc::axum::extract::Json<#body_struct_name>
+                ::rsrpc::axum::extract::Json(body): ::rsrpc::axum::extract::Json<#body_struct_name>
             });
             for name in &body_names {
                 call_args.push(quote! { body.#name });
@@ -805,11 +802,11 @@ fn generate_http_handler(method: &MethodInfo, trait_name: &Ident) -> Option<Toke
     Some(quote! {
         async fn #handler_name<T: #trait_name>(
             #(#extractors),*
-        ) -> impl ::rrpc::axum::response::IntoResponse {
+        ) -> impl ::rsrpc::axum::response::IntoResponse {
             match service.#name(#(#call_args),*).await {
-                Ok(v) => ::rrpc::axum::Json(v).into_response(),
+                Ok(v) => ::rsrpc::axum::Json(v).into_response(),
                 Err(e) => (
-                    ::rrpc::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    ::rsrpc::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     e.to_string()
                 ).into_response(),
             }
@@ -818,7 +815,11 @@ fn generate_http_handler(method: &MethodInfo, trait_name: &Ident) -> Option<Toke
 }
 
 /// Generate the http_routes method that returns an axum Router
-fn generate_http_routes(methods: &[MethodInfo], trait_name: &Ident, trait_vis: &syn::Visibility) -> TokenStream2 {
+fn generate_http_routes(
+    methods: &[MethodInfo],
+    trait_name: &Ident,
+    trait_vis: &syn::Visibility,
+) -> TokenStream2 {
     let http_methods: Vec<&MethodInfo> = methods.iter().filter(|m| m.http.is_some()).collect();
 
     if http_methods.is_empty() {
@@ -853,7 +854,7 @@ fn generate_http_routes(methods: &[MethodInfo], trait_name: &Ident, trait_vis: &
                     .map(|(n, t)| quote! { pub #n: #t })
                     .collect();
                 Some(quote! {
-                    #[derive(::rrpc::serde::Deserialize)]
+                    #[derive(::rsrpc::serde::Deserialize)]
                     struct #struct_name {
                         #(#fields),*
                     }
@@ -887,7 +888,7 @@ fn generate_http_routes(methods: &[MethodInfo], trait_name: &Ident, trait_vis: &
     quote! {
         #[cfg(feature = "http")]
         const _: () = {
-            use ::rrpc::axum::response::IntoResponse;
+            use ::rsrpc::axum::response::IntoResponse;
 
             #(#query_structs)*
             #(#body_structs)*
@@ -897,8 +898,8 @@ fn generate_http_routes(methods: &[MethodInfo], trait_name: &Ident, trait_vis: &
                 /// Create an axum Router for HTTP endpoints.
                 #trait_vis fn http_routes<T: #trait_name + 'static>(
                     service: ::std::sync::Arc<T>
-                ) -> ::rrpc::axum::Router {
-                    ::rrpc::axum::Router::new()
+                ) -> ::rsrpc::axum::Router {
+                    ::rsrpc::axum::Router::new()
                         #(#routes)*
                         .with_state(service)
                 }

@@ -944,7 +944,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rrpc"
+name = "rsrpc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -955,7 +955,7 @@ dependencies = [
  "http",
  "postcard",
  "reqwest",
- "rrpc-macro",
+ "rsrpc-macro",
  "serde",
  "serde_json",
  "tokio",
@@ -964,18 +964,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "rrpc-examples"
+name = "rsrpc-examples"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "rrpc",
+ "rsrpc",
  "serde",
  "tokio",
 ]
 
 [[package]]
-name = "rrpc-macro"
+name = "rsrpc-macro"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",

@@ -34,6 +34,11 @@
 mod stream;
 pub use stream::*;
 
+#[cfg(feature = "http")]
+mod http_client;
+#[cfg(feature = "http")]
+pub use http_client::HttpClient;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -55,6 +60,12 @@ pub use rrpc_macro::service;
 pub use async_trait::async_trait;
 pub use postcard;
 pub use serde;
+
+/// Re-exports for HTTP support (only with `http` feature)
+#[cfg(feature = "http")]
+pub use ::http;
+#[cfg(feature = "http")]
+pub use axum;
 
 // =============================================================================
 // ENCODING TRAITS

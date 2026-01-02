@@ -18,13 +18,27 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+default = []
+http = ["rrpc/http", "dep:axum"]
+
 [dependencies]
 rrpc = { path = "packages/lib" }
 tokio = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
+axum = { version = "0.7", optional = true }
 
 [[example]]
 name = "demo"
 path = "examples/demo.rs"
+
+[[example]]
+name = "streaming"
+path = "examples/streaming.rs"
+
+[[example]]
+name = "http_demo"
+path = "examples/http_demo.rs"
+required-features = ["http"]
 

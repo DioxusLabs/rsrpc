@@ -56,17 +56,83 @@ pub use async_trait::async_trait;
 pub use postcard;
 pub use serde;
 
-/// Helper trait to normalize method return types for wire serialization.
-/// Converts both `T` and `Result<T, E>` to `Result<T, String>`.
-pub trait IntoWireResult<T> {
-    fn into_wire_result(self) -> Result<T, String>;
+// =============================================================================
+// ENCODING TRAITS
+// =============================================================================
+
+/// Trait for encoding server responses into dispatch results.
+///
+/// This trait is automatically implemented for:
+/// - `Result<T, E>` where `T: Serialize` - unary responses
+/// - `Result<RpcStream<T>, E>` - streaming responses
+///
+/// The implementations don't conflict because `RpcStream<T>` intentionally
+/// does not implement `Serialize`.
+pub trait ServerEncoding {
+    /// Convert this response into a dispatch result.
+    fn into_dispatch(self) -> DispatchResult;
 }
 
-impl<T, E: std::fmt::Display> IntoWireResult<T> for Result<T, E> {
-    fn into_wire_result(self) -> Result<T, String> {
-        self.map_err(|e| e.to_string())
+/// Unary response encoding for any serializable Result type.
+impl<T: Serialize, E: std::fmt::Display> ServerEncoding for Result<T, E> {
+    fn into_dispatch(self) -> DispatchResult {
+        let wire_result: Result<T, String> = self.map_err(|e| e.to_string());
+        match postcard::to_allocvec(&wire_result) {
+            Ok(bytes) => DispatchResult::Unary(bytes),
+            Err(e) => DispatchResult::Error(e.to_string()),
+        }
     }
 }
+
+/// Streaming response encoding for RpcStream results.
+/// This impl doesn't conflict with the above because RpcStream doesn't impl Serialize.
+impl<T: Serialize + Unpin + Send + 'static, E: std::fmt::Display> ServerEncoding
+    for Result<RpcStream<T>, E>
+{
+    fn into_dispatch(self) -> DispatchResult {
+        match self {
+            Ok(stream) => DispatchResult::Stream(Box::new(stream)),
+            Err(e) => DispatchResult::Error(e.to_string()),
+        }
+    }
+}
+
+/// Trait for making client calls with automatic encoding/decoding.
+///
+/// This trait is automatically implemented for:
+/// - `Result<T, anyhow::Error>` where `T: DeserializeOwned` - unary calls
+/// - `Result<RpcStream<T>, anyhow::Error>` - streaming calls
+pub trait ClientEncoding<Service: ?Sized + 'static>: Sized {
+    /// Invoke a remote method and decode the response.
+    fn invoke<R: Serialize + Sync>(
+        client: &Client<Service>,
+        method_id: u16,
+        request: &R,
+    ) -> impl Future<Output = Self> + Send;
+}
+
+/// Unary call encoding for any deserializable Result type.
+impl<S: ?Sized + Sync + 'static, T: DeserializeOwned + Send> ClientEncoding<S>
+    for Result<T, anyhow::Error>
+{
+    async fn invoke<R: Serialize + Sync>(client: &Client<S>, method_id: u16, request: &R) -> Self {
+        client.call(method_id, request).await
+    }
+}
+
+/// Streaming call encoding for RpcStream results.
+/// This impl doesn't conflict with the above because RpcStream doesn't impl DeserializeOwned.
+impl<S: ?Sized + Sync + 'static, T: DeserializeOwned + Send + 'static> ClientEncoding<S>
+    for Result<RpcStream<T>, anyhow::Error>
+{
+    async fn invoke<R: Serialize + Sync>(client: &Client<S>, method_id: u16, request: &R) -> Self {
+        client.call_stream(method_id, request).await
+    }
+}
+
+// =============================================================================
+// DISPATCH RESULT
+// =============================================================================
 
 /// Result from dispatching a method call.
 /// Can be either a unary response or a stream of items.
@@ -108,12 +174,29 @@ impl<T: Serialize + Unpin> ErasedStream for RpcStream<T> {
     }
 }
 
+// =============================================================================
+// CLIENT
+// =============================================================================
+
+/// Handle to the background reader task.
+/// When dropped, aborts the reader task to allow clean process exit.
+struct ReaderHandle(tokio::task::JoinHandle<()>);
+
+impl Drop for ReaderHandle {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// A client connection to a remote RPC server.
 ///
 /// The magic: `Client<dyn MyTrait>` implements `MyTrait`, so you can call
 /// `client.method(args)` directly.
 pub struct Client<T: ?Sized> {
     inner: Arc<ClientInner>,
+    /// Keeps reader task alive while client is in use.
+    /// When all Client clones are dropped, this aborts the reader.
+    _reader: Arc<ReaderHandle>,
     _marker: PhantomData<T>,
 }
 
@@ -141,6 +224,7 @@ impl<T: ?Sized> Clone for Client<T> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            _reader: Arc::clone(&self._reader),
             _marker: PhantomData,
         }
     }
@@ -160,14 +244,18 @@ impl<T: ?Sized + 'static> Client<T> {
 
         // Spawn reader task to handle responses
         let inner_clone = Arc::clone(&inner);
-        tokio::spawn(async move {
+        let reader_handle = tokio::spawn(async move {
             if let Err(e) = Self::read_responses(inner_clone, reader).await {
-                eprintln!("Client reader error: {e}");
+                // Only log if it's not a cancellation (which happens on clean shutdown)
+                if !e.to_string().contains("canceled") {
+                    eprintln!("Client reader error: {e}");
+                }
             }
         });
 
         Ok(Self {
             inner,
+            _reader: Arc::new(ReaderHandle(reader_handle)),
             _marker: PhantomData,
         })
     }
@@ -238,7 +326,7 @@ impl<T: ?Sized + 'static> Client<T> {
 
     /// Low-level call method used by generated trait impls.
     /// Sends a request and waits for a unary response.
-    pub async fn call<Req: Serialize, Resp: DeserializeOwned>(
+    pub async fn call<Req: Serialize + Sync, Resp: DeserializeOwned>(
         &self,
         method_id: u16,
         request: &Req,
@@ -274,7 +362,7 @@ impl<T: ?Sized + 'static> Client<T> {
     }
 
     /// Start a streaming call. Returns a stream of responses.
-    pub async fn call_stream<Req: Serialize, Item: DeserializeOwned + Send + 'static>(
+    pub async fn call_stream<Req: Serialize + Sync, Item: DeserializeOwned + Send + 'static>(
         &self,
         method_id: u16,
         request: &Req,
@@ -337,88 +425,16 @@ impl<T: ?Sized + 'static> Client<T> {
 
         Ok(RpcStream::new(item_rx))
     }
-
-    /// Get a handle for sending stream items to the server.
-    /// Used for client-side streaming and bidirectional streaming.
-    pub fn stream_sender(&self, method_id: u16, request_id: u64) -> ClientStreamSender {
-        ClientStreamSender {
-            inner: Arc::clone(&self.inner),
-            method_id,
-            request_id,
-        }
-    }
-
-    /// Allocate a new request ID.
-    pub fn next_request_id(&self) -> u64 {
-        self.inner.next_request_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Access the inner writer for advanced use cases.
-    pub fn writer(&self) -> &Mutex<tokio::io::WriteHalf<TcpStream>> {
-        &self.inner.writer
-    }
 }
 
-/// Handle for sending stream items from client to server.
-pub struct ClientStreamSender {
-    inner: Arc<ClientInner>,
-    method_id: u16,
-    request_id: u64,
-}
-
-impl ClientStreamSender {
-    /// Send an item to the server stream.
-    pub async fn send<T: Serialize>(&self, item: &T) -> Result<()> {
-        let payload = postcard::to_allocvec(item)?;
-        let header = encode_stream_header(
-            FrameType::StreamItem,
-            self.method_id,
-            self.request_id,
-            payload.len() as u32,
-        );
-
-        let mut message = Vec::with_capacity(STREAM_HEADER_SIZE + payload.len());
-        message.extend_from_slice(&header);
-        message.extend_from_slice(&payload);
-
-        self.inner.writer.lock().await.write_all(&message).await?;
-        Ok(())
-    }
-
-    /// Signal end of client stream.
-    pub async fn end(&self) -> Result<()> {
-        let header =
-            encode_stream_header(FrameType::StreamEnd, self.method_id, self.request_id, 0);
-        self.inner.writer.lock().await.write_all(&header).await?;
-        Ok(())
-    }
-
-    /// Send an error and end the stream.
-    pub async fn error(&self, err: impl std::fmt::Display) -> Result<()> {
-        let payload = postcard::to_allocvec(&err.to_string())?;
-        let header = encode_stream_header(
-            FrameType::StreamError,
-            self.method_id,
-            self.request_id,
-            payload.len() as u32,
-        );
-
-        let mut message = Vec::with_capacity(STREAM_HEADER_SIZE + payload.len());
-        message.extend_from_slice(&header);
-        message.extend_from_slice(&payload);
-
-        self.inner.writer.lock().await.write_all(&message).await?;
-        Ok(())
-    }
-}
+// =============================================================================
+// SERVER
+// =============================================================================
 
 /// Type alias for dispatch handler functions.
 /// Takes (service, method_id, payload) and returns either unary or streaming result.
-pub type DispatchFn<T> = for<'a> fn(
-    &'a T,
-    u16,
-    &'a [u8],
-) -> Pin<Box<dyn Future<Output = DispatchResult> + Send + 'a>>;
+pub type DispatchFn<T> =
+    for<'a> fn(&'a T, u16, &'a [u8]) -> Pin<Box<dyn Future<Output = DispatchResult> + Send + 'a>>;
 
 /// A server that hosts an RPC service implementation.
 ///
@@ -509,15 +525,12 @@ impl<T: ?Sized + Send + Sync + 'static> Server<T> {
                                 use std::future::poll_fn;
                                 use std::pin::Pin;
 
-                                // Pin the stream for polling
                                 let mut stream = stream;
 
                                 loop {
                                     let item = poll_fn(|cx| {
                                         // SAFETY: The stream is boxed and we never move it
-                                        let pinned = unsafe {
-                                            Pin::new_unchecked(&mut *stream)
-                                        };
+                                        let pinned = unsafe { Pin::new_unchecked(&mut *stream) };
                                         pinned.poll_next_bytes(cx)
                                     })
                                     .await;
@@ -537,7 +550,12 @@ impl<T: ?Sized + Send + Sync + 'static> Server<T> {
                                             message.extend_from_slice(&header);
                                             message.extend_from_slice(&item_bytes);
 
-                                            if writer.lock().await.write_all(&message).await.is_err()
+                                            if writer
+                                                .lock()
+                                                .await
+                                                .write_all(&message)
+                                                .await
+                                                .is_err()
                                             {
                                                 break;
                                             }
@@ -612,72 +630,6 @@ impl<T: ?Sized + Send + Sync + 'static> Server<T> {
             }
         }
 
-        Ok(())
-    }
-}
-
-/// Handle for sending stream responses from server to client.
-pub struct ServerStreamSender {
-    writer: Arc<Mutex<tokio::io::WriteHalf<TcpStream>>>,
-    method_id: u16,
-    request_id: u64,
-}
-
-impl ServerStreamSender {
-    /// Create a new server stream sender.
-    pub fn new(
-        writer: Arc<Mutex<tokio::io::WriteHalf<TcpStream>>>,
-        method_id: u16,
-        request_id: u64,
-    ) -> Self {
-        Self {
-            writer,
-            method_id,
-            request_id,
-        }
-    }
-
-    /// Send an item to the client stream.
-    pub async fn send<T: Serialize>(&self, item: &T) -> Result<()> {
-        let payload = postcard::to_allocvec(item)?;
-        let header = encode_stream_header(
-            FrameType::StreamItem,
-            self.method_id,
-            self.request_id,
-            payload.len() as u32,
-        );
-
-        let mut message = Vec::with_capacity(STREAM_HEADER_SIZE + payload.len());
-        message.extend_from_slice(&header);
-        message.extend_from_slice(&payload);
-
-        self.writer.lock().await.write_all(&message).await?;
-        Ok(())
-    }
-
-    /// Signal successful end of stream.
-    pub async fn end(&self) -> Result<()> {
-        let header =
-            encode_stream_header(FrameType::StreamEnd, self.method_id, self.request_id, 0);
-        self.writer.lock().await.write_all(&header).await?;
-        Ok(())
-    }
-
-    /// Send an error and end the stream.
-    pub async fn error(&self, err: impl std::fmt::Display) -> Result<()> {
-        let payload = postcard::to_allocvec(&err.to_string())?;
-        let header = encode_stream_header(
-            FrameType::StreamError,
-            self.method_id,
-            self.request_id,
-            payload.len() as u32,
-        );
-
-        let mut message = Vec::with_capacity(STREAM_HEADER_SIZE + payload.len());
-        message.extend_from_slice(&header);
-        message.extend_from_slice(&payload);
-
-        self.writer.lock().await.write_all(&message).await?;
         Ok(())
     }
 }

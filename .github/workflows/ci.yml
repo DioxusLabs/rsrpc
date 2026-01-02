@@ -1,11 +1,13 @@
 name: CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
 
-# Cancel in-progress runs for the same PR
+# Cancel in-progress runs for the same PR/branch
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -18,7 +20,7 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft != true
+    if: github.event_name == 'push' || github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -29,7 +31,7 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft != true
+    if: github.event_name == 'push' || github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -41,7 +43,7 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft != true
+    if: github.event_name == 'push' || github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -51,7 +53,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft != true
+    if: github.event_name == 'push' || github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -61,7 +63,7 @@ jobs:
   test-no-default:
     name: Test (no default features)
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft != true
+    if: github.event_name == 'push' || github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -71,7 +73,7 @@ jobs:
   docs:
     name: Documentation
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft != true
+    if: github.event_name == 'push' || github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -83,7 +85,7 @@ jobs:
   msrv:
     name: MSRV (1.75)
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft != true
+    if: github.event_name == 'push' || github.event.pull_request.draft != true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.75
